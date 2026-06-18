@@ -1,0 +1,37 @@
+challenge1:
+  # 队伍侧：
+  #   0 = BLUE 蓝方
+  #   1 = RED  红方
+  # 赛场快速切队只改这一行。
+  team_side: 0
+
+  # 详细文件日志：
+  #   false = 关闭，正常比赛推荐
+  #   true  = 打开，会写入 files/record/logs，用于复盘调试
+  detailed_file_log: false
+
+  # 双相机外参标定: odin1_rgb_link → d435i_kfs_link
+  # BA 优化后更新以下参数（禁止在代码中硬编码）
+  calibration:
+    parent_frame: "odin1_rgb_link"
+    child_frame: "d435i_kfs_link"
+    x: 0.011084296
+    y: 0.007840844
+    z: 0.063193769
+    roll: 0.003783634
+    pitch: 0.246510272
+    yaw: 0.012716143
+
+  # 武器相机外参标定: odin1_rgb_link → d435i_weapon_link
+  calibration_weapon:
+    parent_frame: "odin1_rgb_link"
+    child_frame: "d435i_weapon_link"
+    x: -0.029347619
+    y: -0.007210676
+    z: 0.236948354
+    roll: 0.012505885
+    pitch: 0.242805442
+    yaw: 0.025973219
+
+system:
+  tick_hz: 20                     # tick 频率 (Hz), 20=50ms/步

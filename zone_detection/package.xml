@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>zone_detection</name>
+  <version>0.0.0</version>
+  <description>Zone2 (Merlin facade) and Zone3 (3x3 grid) LiDAR detection nodes.
+    Provides point-cloud-based localization for the Merlin stair region and the
+    Z3 high-platform grid, publishing dynamic odom-&gt;{team}_zone{2,3}_root TF.</description>
+  <maintainer email="inkc008@gmail.com">inkc</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

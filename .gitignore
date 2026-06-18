@@ -1,0 +1,34 @@
+# ROS / colcon build outputs
+build/
+install/
+log/
+
+# Large recordings
+bag/
+*.db3
+*.mcap
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local editor / agent state
+.vscode/
+.idea/
+.claude/
+.codex/
+
+# Runtime logs and generated debug outputs
+*.log
+*.tmp
+*.bak
+RECOVERED_FILES/
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+.DS_Store
