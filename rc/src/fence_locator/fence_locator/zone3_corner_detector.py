@@ -86,11 +86,11 @@ def fit_zone3_corner_from_samples(
     platform_z = dense_z_mode(platform_seed)
     if platform_z is None:
         platform_z = float(np.percentile(z, 86.0))
-    platform = (z >= platform_z - 0.08) & (z <= platform_z + 0.12) & (u >= 0.55)
+    platform = (z >= platform_z - 0.12) & (z <= platform_z + 0.16) & (u >= 0.55)
     pu = u[platform]
     pv = v[platform]
     pz = z[platform]
-    if len(pu) < 600:
+    if len(pu) < 450:
         return None, f"few_platform:{len(pu)}"
 
     side_specs = (

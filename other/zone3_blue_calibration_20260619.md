@@ -131,3 +131,55 @@ zone3 root fit: ... inside=7716, outside=0, out_ratio=0.00, inside_refine=(+0.00
 - 当前校准姿态已经满足“场地附近点云不应跑到场外”的约束。
 - 因为 `outside=0`，局部优化没有继续移动 root。
 - 这比上一版直接最大化 inside 分数更稳，避免为了追求 `outside=0` 把已校准好的姿态拉走。
+
+## 2026-06-19 18:03 默认有头 launch 前验证
+
+本次改动目的：
+
+- 默认 launch 不再从 bag 开头等完整流程，改为 `bag_start_offset=14.0`，从上坡前一段开始。
+- 节点先启动，bag 延迟 `bag_start_delay=2.0` 秒启动，避免状态机还没订阅就错过 odom。
+- 上平台后点云采样从 12 帧增加到 24 帧。
+- 角点检测的平台层不再用 `86%` 分位高度，而是使用 Z 直方图最密集层，降低行人/竖直杂点对平台层筛选的影响。
+- 平台层窗口放宽为 `platform_z-0.12 ~ platform_z+0.16`，避免有效平台点被筛得太少。
+
+默认无头验证命令：
+
+```bash
+cd /mnt/c/Users/22240/rc2026_snapshot/rc
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+timeout 110 ros2 launch fence_locator launch_fence.launch.py \
+  launch_rviz:=false \
+  launch_tuner:=false \
+  hold_pointcloud:=false \
+  publish_field_model:=false \
+  read_ahead_queue_size:=10000
+```
+
+关键输出：
+
+```text
+baseline done: z=-0.003, pitch=-9.34deg
+transition: flat_to_uphill -> uphill
+transition: uphill -> uphill_to_platform
+transition: uphill_to_platform -> platform
+start post-platform point cloud collection, target_frames=24
+stop post-platform point cloud collection, frames=24, samples=57987
+zone3 root tf: odom -> blue_zone3_root_auto, xyz=(9.867,1.867,-0.263), yaw=92.50deg
+zone3 root fit: ... angle=90.0deg, vertical_n=1070, refined=True, source=platform_2d_ransac:orthogonal_far, root_calib=(+0.009,+0.016,+0.000,+0.66deg), inside=7280, outside=26, out_ratio=0.00
+```
+
+当前 launch 补偿值：
+
+```text
+zone3_root_calib_forward_m = 0.009
+zone3_root_calib_lateral_m = 0.016
+zone3_root_calib_z_m = 0.0
+zone3_root_calib_yaw_deg = 0.66
+```
+
+当前结论：
+
+- 自动 TF 已贴近用户 Qt 手动校准目标 `(9.8665, 1.8655, -0.2648, 92.50deg)`。
+- 场地内点约束通过：`inside=7280, outside=26, out_ratio≈0`。
+- 清理旧 ROS 进程后结果稳定；如果状态机基准突然变成 `z≈0.42`，优先怀疑旧 bag/旧节点干扰。

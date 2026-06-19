@@ -11,6 +11,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     bag_path = LaunchConfiguration("bag_path")
     bag_start_offset = LaunchConfiguration("bag_start_offset")
+    bag_start_delay = LaunchConfiguration("bag_start_delay")
     bag_rate = LaunchConfiguration("bag_rate")
     read_ahead_queue_size = LaunchConfiguration("read_ahead_queue_size")
     field_side = LaunchConfiguration("field_side")
@@ -45,8 +46,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "bag_start_offset",
-            default_value="22.0",
+            default_value="14.0",
             description="Seconds to skip from bag start; default starts a few seconds before ramp detection.",
+        ),
+        DeclareLaunchArgument(
+            "bag_start_delay",
+            default_value="2.0",
+            description="Seconds to wait before starting rosbag so subscribers are ready first.",
         ),
         DeclareLaunchArgument(
             "read_ahead_queue_size",
@@ -231,6 +237,7 @@ def generate_launch_description():
                 "zone3_root_frame": "blue_zone3_root_auto",
                 "publish_zone3_field_marker": True,
                 "publish_fence_top_marker": publish_fence_top_marker,
+                "zone3_post_platform_cloud_frames": 24,
                 "entry_forward_source": entry_forward_source,
                 "use_odom_pca_yaw": False,
                 "update_ramp_yaw_from_odom": False,
@@ -244,10 +251,10 @@ def generate_launch_description():
                 "zone3_ransac_min_inliers": zone3_ransac_min_inliers,
                 # 2026-06-19: 当前固定蓝区后，按 Qt 手动校准值反推的新补偿。
                 # 目标约 (9.8665, 1.8655, -0.2648, 92.50deg)。
-                "zone3_root_calib_forward_m": -0.161,
-                "zone3_root_calib_lateral_m": 0.040,
+                "zone3_root_calib_forward_m": 0.009,
+                "zone3_root_calib_lateral_m": 0.016,
                 "zone3_root_calib_z_m": 0.0,
-                "zone3_root_calib_yaw_deg": 0.40,
+                "zone3_root_calib_yaw_deg": 0.66,
                 "enable_zone3_inside_refine": True,
                 "zone3_inside_refine_xy_range_m": 0.08,
                 "zone3_inside_refine_xy_step_m": 0.02,
@@ -319,6 +326,10 @@ def generate_launch_description():
         period=node_start_delay,
         actions=[uphill, fence, cloud_hold, field_model, rviz, tuner],
     )
+    bag_nodes = TimerAction(
+        period=bag_start_delay,
+        actions=[bag_play, bag_play_same_terminal, bag_play_no_keyboard],
+    )
 
     shutdown_log = RegisterEventHandler(
         OnShutdown(
@@ -331,5 +342,5 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        args + [bag_play, bag_play_same_terminal, bag_play_no_keyboard, analysis_nodes, shutdown_log]
+        args + [analysis_nodes, bag_nodes, shutdown_log]
     )
