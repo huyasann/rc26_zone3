@@ -34,9 +34,10 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             "bag_path",
-            default_value="/mnt/c/Users/22240/rc2026_snapshot/bag/cha1nav2_20260523_133237/",
+            default_value="/mnt/c/Users/22240/rc2026_snapshot/bag/cha1nav2_20260612_154209/",
             #cha1nav2_20260523_133237
             #cha1nav2_20260612_154209/
+            #cha1nav2_20260523_201149/
             description="rosbag2 目录路径",
         ),
         DeclareLaunchArgument(
@@ -159,6 +160,11 @@ def generate_launch_description():
             read_ahead_queue_size,
             "--clock",
             "100",
+            "--topics",
+            "/odin1/odometry_highfreq",
+            "/odin1/cloud_slam",
+            "/tf",
+            "/tf_static",
         ],
         output="log",
         sigterm_timeout="2.0",
@@ -180,6 +186,11 @@ def generate_launch_description():
             read_ahead_queue_size,
             "--clock",
             "100",
+            "--topics",
+            "/odin1/odometry_highfreq",
+            "/odin1/cloud_slam",
+            "/tf",
+            "/tf_static",
         ],
         output="log",
         sigterm_timeout="2.0",
@@ -202,6 +213,11 @@ def generate_launch_description():
             "--clock",
             "100",
             "--disable-keyboard-controls",
+            "--topics",
+            "/odin1/odometry_highfreq",
+            "/odin1/cloud_slam",
+            "/tf",
+            "/tf_static",
         ],
         output="log",
         sigterm_timeout="2.0",
@@ -214,7 +230,13 @@ def generate_launch_description():
         executable="uphill_state_node",
         name="uphill_state_node",
         output="screen",
-        parameters=[{"use_sim_time": True}],
+        parameters=[
+            {
+                "use_sim_time": True,
+                "pitch_platform_deg": 6.0,
+                "hold_s": 0.20,
+            }
+        ],
         sigterm_timeout="2.0",
         sigkill_timeout="2.0",
     )
@@ -237,7 +259,10 @@ def generate_launch_description():
                 "zone3_root_frame": "blue_zone3_root_auto",
                 "publish_zone3_field_marker": True,
                 "publish_fence_top_marker": publish_fence_top_marker,
+                "cloud_ransac_max_points": 180000,
+                "cloud_ransac_keep_first_frames": 10,
                 "zone3_post_platform_cloud_frames": 24,
+                "zone3_post_platform_skip_frames": 0,
                 "entry_forward_source": entry_forward_source,
                 "use_odom_pca_yaw": False,
                 "update_ramp_yaw_from_odom": False,
@@ -305,6 +330,8 @@ def generate_launch_description():
         output="screen",
         parameters=[{"use_sim_time": True}],
         condition=IfCondition(launch_rviz),
+        sigterm_timeout="3.0",
+        sigkill_timeout="3.0",
     )
 
     tuner = Node(
@@ -320,6 +347,8 @@ def generate_launch_description():
             }
         ],
         condition=IfCondition(launch_tuner),
+        sigterm_timeout="3.0",
+        sigkill_timeout="3.0",
     )
 
     analysis_nodes = TimerAction(

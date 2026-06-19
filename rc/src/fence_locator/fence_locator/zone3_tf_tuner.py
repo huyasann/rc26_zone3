@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import signal
 import sys
 
 try:
@@ -274,9 +275,14 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     app = QtWidgets.QApplication(sys.argv)
+    signal.signal(signal.SIGINT, lambda *_args: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_args: app.quit())
     node = Zone3TfTunerNode()
     window = Zone3TfTunerWindow(node)
     window.show()
+    signal_timer = QtCore.QTimer()
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start(100)
     try:
         app.exec_()
     finally:
@@ -285,7 +291,11 @@ def main(args: list[str] | None = None) -> None:
         marker.ns = "zone3_tf_tuner"
         marker.id = 1
         marker.action = Marker.DELETE
-        node.marker_pub.publish(marker)
+        try:
+            node.marker_pub.publish(marker)
+            rclpy.spin_once(node, timeout_sec=0.05)
+        except Exception:
+            pass
         node.destroy_node()
         rclpy.shutdown()
 

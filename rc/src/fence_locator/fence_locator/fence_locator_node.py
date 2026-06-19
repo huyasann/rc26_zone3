@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import select
 import sys
@@ -73,6 +74,9 @@ class FenceLocatorNode(Node):
         )
         self.cloud_ransac_max_points = int(
             self.declare_parameter("cloud_ransac_max_points", 60000).value
+        )
+        self.cloud_ransac_keep_first_frames = int(
+            self.declare_parameter("cloud_ransac_keep_first_frames", 10).value
         )
         self.cloud_ransac_min_edge_points = int(
             self.declare_parameter("cloud_ransac_min_edge_points", 6).value
@@ -191,6 +195,9 @@ class FenceLocatorNode(Node):
         self.zone3_post_platform_cloud_frames = int(
             self.declare_parameter("zone3_post_platform_cloud_frames", 12).value
         )
+        self.zone3_post_platform_skip_frames = int(
+            self.declare_parameter("zone3_post_platform_skip_frames", 0).value
+        )
         self.enable_zone3_inside_refine = bool(
             self.declare_parameter("enable_zone3_inside_refine", True).value
         )
@@ -279,8 +286,10 @@ class FenceLocatorNode(Node):
         self.zone3_root_tf_log_once = False
         self.zone3_collect_after_platform = False
         self.zone3_platform_cloud_frames = 0
+        self.zone3_platform_skipped_frames = 0
 
         self.create_subscription(String, "/uphill/state", self.on_state, 10)
+        self.create_subscription(String, "/uphill/debug", self.on_debug, 10)
         self.create_subscription(PoseStamped, "/uphill/transition_pose", self.on_transition_pose, 10)
         self.create_subscription(Odometry, "/odin1/odometry_highfreq", self.on_odom, 50)
         self.create_subscription(PointCloud2, "/odin1/cloud_slam", self.on_cloud, 10)
@@ -382,7 +391,7 @@ class FenceLocatorNode(Node):
         self.finalized = True
         self.collection_reset_done = False
         self.get_logger().info(
-            "stop post-platform point cloud collection, "
+            "stop ramp-to-platform point cloud collection, "
             f"frames={self.zone3_platform_cloud_frames}, "
             f"samples={self.cloud_sample_points}, "
             f"cloud={self.cloud_seen}, analyzed={self.cloud_analyzed}"
@@ -390,11 +399,41 @@ class FenceLocatorNode(Node):
         self.fuse_and_publish()
 
     def on_state(self, msg: String) -> None:
-        new_state = msg.data.strip()
+        self._handle_uphill_state(msg.data.strip())
+
+    def on_debug(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+        except Exception:
+            return
+        internal_state = str(data.get("internal_state", "")).strip()
+        if internal_state != "flat_to_uphill" or self.collection_reset_done:
+            return
+        # debug 的候选状态比 /uphill/state 更早，但会短时抖动。
+        # 只在候选持续、角度增长、Z 已经有抬升时，提前开始缓存点云；最终仍等 platform 才发布。
+        duration = float(data.get("state_duration_s", 0.0) or 0.0)
+        pitch = float(data.get("pitch_abs_ema_deg", 0.0) or 0.0)
+        peak = float(data.get("candidate_peak_pitch", 0.0) or 0.0)
+        z_rise = float(data.get("z_rise_ema_m", 0.0) or 0.0)
+        if duration >= 0.30 and peak >= 4.0 and pitch >= 2.0 and z_rise >= 0.012:
+            self._start_collection_from_transition("early candidate ramp")
+
+    def _handle_uphill_state(self, new_state: str) -> None:
         if new_state == self.last_state_pub:
             return
         self.last_state_pub = new_state
         self.state = new_state
+
+        if self.state == "flat":
+            if self.zone3_collect_after_platform and not self.finalized:
+                self._reset_zone3_cloud_cache("candidate_back_flat")
+                self.zone3_collect_after_platform = False
+                self.zone3_platform_cloud_frames = 0
+                self.zone3_platform_skipped_frames = 0
+                self.collection_reset_done = False
+                self.enabled = False
+                self.get_logger().info("candidate ramp rejected, early zone3 cloud cache cleared")
+            return
 
         if self.state == "flat_to_uphill":
             if self.collection_reset_done:
@@ -425,8 +464,9 @@ class FenceLocatorNode(Node):
             self.ramp_odom_points = self._backtracked_odom_points()
             self.collect_ramp_odom = True
             self._reset_zone3_cloud_cache("reset")
-            self.zone3_collect_after_platform = False
+            self.zone3_collect_after_platform = True
             self.zone3_platform_cloud_frames = 0
+            self.zone3_platform_skipped_frames = 0
             self.collection_reset_done = True
             self.lateral_ests.clear()
             self.trusted_count = 0
@@ -442,16 +482,18 @@ class FenceLocatorNode(Node):
             self.lateral_detection_enabled = False
             self.finalized = False
             self.collection_log_once = False
-            self.get_logger().info("waiting for platform before zone3 point cloud collection")
+            self.get_logger().info(
+                "candidate ramp detected, start early zone3 cloud cache; "
+                "will publish only after platform confirmation"
+            )
         elif self.state == "uphill":
             if not self.collection_reset_done:
                 self._start_collection_from_transition("confirmed ramp")
-                self._reset_zone3_cloud_cache("reset_before_platform")
             self.enabled = True
             self.lateral_detection_enabled = False
             if not self.collection_log_once:
                 self.collection_log_once = True
-                self.get_logger().info("ramp confirmed, zone3 point cloud collection still waiting for platform")
+                self.get_logger().info("ramp confirmed, start caching zone3 point cloud before platform")
         elif self.state == "uphill_to_platform":
             self.enabled = True
             self.lateral_detection_enabled = False
@@ -464,17 +506,22 @@ class FenceLocatorNode(Node):
                 self._update_fixed_ramp_from_end()
             self.finalized = True
             self.collection_reset_done = False
-            self.enabled = False
             self.lateral_detection_enabled = False
-            self._reset_zone3_cloud_cache("post_platform_reset")
-            self.zone3_collect_after_platform = True
-            self.zone3_platform_cloud_frames = 0
+            if not self.zone3_collect_after_platform:
+                self._reset_zone3_cloud_cache("platform_reset")
+                self.zone3_collect_after_platform = True
+                self.zone3_platform_cloud_frames = 0
+                self.zone3_platform_skipped_frames = 0
+                self.get_logger().warn("platform reached before ramp cloud cache, start fallback collection")
             self.enabled = True
-            self.lateral_detection_enabled = False
             self.finalized = False
             self.get_logger().info(
-                f"start post-platform point cloud collection, target_frames={self.zone3_post_platform_cloud_frames}"
+                "platform reached, finish zone3 cloud collection when enough frames are cached, "
+                f"current_frames={self.zone3_platform_cloud_frames}, "
+                f"target_frames={self.zone3_post_platform_cloud_frames}"
             )
+            if self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames):
+                self._finish_platform_cloud_collection()
 
     def _start_collection_from_transition(self, reason: str) -> None:
         if self.ground_z is not None:
@@ -514,6 +561,9 @@ class FenceLocatorNode(Node):
         self.cloud_lateral_correction = 0.0
         self.zone3_root_tf_log_once = False
         self.collection_reset_done = True
+        self.zone3_collect_after_platform = True
+        self.zone3_platform_cloud_frames = 0
+        self.zone3_platform_skipped_frames = 0
         self.lateral_ests.clear()
         self.trusted_count = 0
         self.two_side_count = 0
@@ -528,7 +578,10 @@ class FenceLocatorNode(Node):
         self.lateral_detection_enabled = False
         self.finalized = False
         self.collection_log_once = False
-        self.get_logger().info(f"prepared ramp pose from {reason}, waiting for platform before zone3 cloud collection")
+        self.get_logger().info(
+            f"prepared ramp pose from {reason}, start ramp-to-platform cloud cache, "
+            f"target_frames={self.zone3_post_platform_cloud_frames}"
+        )
 
     def _take_transition_start_pose(self) -> tuple[float, float, float, float] | None:
         if self.pending_transition_pose is None:
@@ -555,9 +608,12 @@ class FenceLocatorNode(Node):
         yv = y[valid]
         zv = z[valid]
         if self.zone3_collect_after_platform:
+            if self.zone3_platform_skipped_frames < max(0, self.zone3_post_platform_skip_frames):
+                self.zone3_platform_skipped_frames += 1
+                return
             self._cache_cloud_points(xv, yv, zv)
             self.zone3_platform_cloud_frames += 1
-            if self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames):
+            if self.state == "platform" and self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames):
                 self._finish_platform_cloud_collection()
             return
         if not self.lateral_detection_enabled:
@@ -935,8 +991,10 @@ class FenceLocatorNode(Node):
         sample = np.column_stack((x[::step], y[::step], z[::step])).astype(np.float64, copy=False)
         self.cloud_samples.append(sample)
         self.cloud_sample_points += len(sample)
+        keep_first = max(0, min(int(self.cloud_ransac_keep_first_frames), len(self.cloud_samples)))
         while self.cloud_samples and self.cloud_sample_points > self.cloud_ransac_max_points:
-            removed = self.cloud_samples.pop(0)
+            remove_idx = keep_first if len(self.cloud_samples) > keep_first else 0
+            removed = self.cloud_samples.pop(remove_idx)
             self.cloud_sample_points -= len(removed)
 
     def _cloud_ransac_line_is_trusted(self) -> bool:

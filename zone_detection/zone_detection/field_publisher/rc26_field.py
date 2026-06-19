@@ -6,10 +6,12 @@
 """
 
 import math
+import time
 import rclpy
 from geometry_msgs.msg import Point, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.signals import SignalHandlerOptions
 from tf2_ros import StaticTransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -1083,6 +1085,27 @@ class Zone12CarpetPublisher(Node):
         except Exception as exc:
             self.get_logger().error(f"Marker publish failed: {exc}", throttle_duration_sec=5.0)
 
+    def clear_markers(self):
+        """退出前清理 RViz 中的瞬态 MarkerArray。"""
+        if not PUBLISH_MARKERS:
+            return
+        try:
+            ma = MarkerArray()
+            marker = Marker()
+            marker.header.stamp = self._marker_stamp()
+            marker.header.frame_id = "odom"
+            marker.ns = ""
+            marker.id = 0
+            marker.action = Marker.DELETEALL
+            ma.markers.append(marker)
+            for _ in range(3):
+                self._marker_pub.publish(ma)
+                rclpy.spin_once(self, timeout_sec=0.05)
+                time.sleep(0.05)
+            self.get_logger().info("已清除 /arena/field_markers 残留 Marker")
+        except Exception as exc:
+            print(f"清除 /arena/field_markers 失败: {exc}")
+
     def _print_config(self):
         """日志输出当前运行配置。"""
         self.get_logger().info("=" * 56)
@@ -1120,7 +1143,7 @@ class Zone12CarpetPublisher(Node):
 
 def main():
     """入口: 初始化 ROS2, 创建节点并 spin."""
-    rclpy.init()
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = None
     try:
         node = Zone12CarpetPublisher()
@@ -1129,6 +1152,7 @@ def main():
         pass
     finally:
         if node is not None:
+            node.clear_markers()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

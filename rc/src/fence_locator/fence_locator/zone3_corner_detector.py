@@ -236,19 +236,35 @@ def refine_zone3_corner_vertical_ransac(
     if len(vu) < config.ransac_min_inliers:
         return None
 
+    direct = refine_zone3_corner_from_vertical_bins(
+        vu,
+        vv,
+        corner_u,
+        corner_v,
+        config,
+    )
+    if direct is not None:
+        direct["source"] = "vertical_bins:" + str(direct.get("source", "unknown"))
+        direct["vertical_candidates"] = int(len(vu))
+        direct["vertical_span_median"] = float(np.median(vz_span)) if len(vz_span) else 0.0
+        direct["vertical_count_median"] = float(np.median(vcount)) if len(vcount) else 0.0
+        return direct
+
     radius = max(0.25, config.ransac_radius)
     outer_seed_dist = np.abs(vv - (outer_k * vu + outer_b))
     far_seed_dist = np.abs(vu - (far_k * vv + far_b))
+    # 这里优先相信围栏的竖直点列，而不是平台地面外轮廓。
+    # 旧窗口太窄，车斜着上坡或行人残留时，粗角点会把真实竖直边排除掉。
     outer_mask = (
-        (outer_seed_dist <= 0.18)
-        & (vu >= corner_u - radius * 1.8)
-        & (vu <= corner_u + radius * 0.45)
-        & (np.hypot(vu - corner_u, vv - corner_v) <= radius * 1.9)
+        (outer_seed_dist <= 0.28)
+        & (vu >= corner_u - radius * 2.6)
+        & (vu <= corner_u + radius * 0.75)
+        & (np.hypot(vu - corner_u, vv - corner_v) <= radius * 2.8)
     )
     far_mask = (
-        (far_seed_dist <= 0.18)
-        & (np.abs(vu - corner_u) <= radius * 0.65)
-        & (np.abs(vv - corner_v) <= radius * 1.7)
+        (far_seed_dist <= 0.28)
+        & (np.abs(vu - corner_u) <= radius * 0.95)
+        & (np.abs(vv - corner_v) <= radius * 2.4)
     )
     if int(outer_mask.sum()) < config.vertical_min_points_per_line or int(far_mask.sum()) < config.vertical_min_points_per_line:
         return None
@@ -270,6 +286,65 @@ def refine_zone3_corner_vertical_ransac(
     refined["vertical_candidates"] = int(len(vu))
     refined["vertical_span_median"] = float(np.median(vz_span)) if len(vz_span) else 0.0
     refined["vertical_count_median"] = float(np.median(vcount)) if len(vcount) else 0.0
+    return refined
+
+
+def refine_zone3_corner_from_vertical_bins(
+    vu: np.ndarray,
+    vv: np.ndarray,
+    corner_u: float,
+    corner_v: float,
+    config: Zone3CornerConfig,
+) -> dict | None:
+    """Fit the two visible fence axes from vertical point columns first.
+
+    The platform/ramp surface can create a strong 2D outline, but the target corner is defined
+    by vertical fence columns. This path extracts a side boundary and a far boundary from the
+    vertical-column cloud, then forces the final pair to be orthogonal.
+    """
+    if len(vu) < config.ransac_min_inliers:
+        return None
+    outer_pct = 96.0
+    if config.forced_side == "negative":
+        outer_pct = 4.0
+
+    ou, ov = boundary_by_bins(vu, vv, 0.10, outer_pct, 2)
+    fv, fu = boundary_by_bins(vv, vu, 0.10, 96.0, 2)
+    if len(ou) < 6 or len(fu) < 6:
+        return None
+
+    outer_pts = np.column_stack((ou, ov))
+    far_pts = np.column_stack((fu, fv))
+    # Keep only the edge sections near the expected corner. This rejects people/wall columns
+    # that are vertical but do not belong to the two fence axes.
+    radius = max(0.35, config.ransac_radius * 1.35)
+    outer_keep = (
+        (np.abs(outer_pts[:, 1] - corner_v) <= radius * 1.25)
+        & (outer_pts[:, 0] >= corner_u - radius * 2.8)
+        & (outer_pts[:, 0] <= corner_u + radius * 0.9)
+    )
+    far_keep = (
+        (np.abs(far_pts[:, 0] - corner_u) <= radius * 1.25)
+        & (far_pts[:, 1] >= corner_v - radius * 2.2)
+        & (far_pts[:, 1] <= corner_v + radius * 2.2)
+    )
+    outer_pts = outer_pts[outer_keep]
+    far_pts = far_pts[far_keep]
+    if len(outer_pts) < 5 or len(far_pts) < 5:
+        return None
+
+    refined = refine_from_two_point_sets(
+        outer_pts,
+        far_pts,
+        corner_u,
+        corner_v,
+        config,
+        seed_outer=20260622,
+        seed_far=20260623,
+        max_shift=max(config.ransac_max_shift, 0.45),
+    )
+    if refined is None:
+        return None
     return refined
 
 
@@ -325,6 +400,7 @@ def refine_from_two_point_sets(
     config: Zone3CornerConfig,
     seed_outer: int,
     seed_far: int,
+    max_shift: float | None = None,
 ) -> dict | None:
     min_inliers = max(2, min(config.ransac_min_inliers, len(outer_pts), len(far_pts)))
     outer_line = ransac_line_2d(outer_pts, config.ransac_dist_thr, min_inliers, seed=seed_outer)
@@ -341,7 +417,8 @@ def refine_from_two_point_sets(
         return None
     refined_u, refined_v = intersection
     shift = math.hypot(refined_u - corner_u, refined_v - corner_v)
-    if shift > config.ransac_max_shift:
+    allowed_shift = config.ransac_max_shift if max_shift is None else max_shift
+    if shift > allowed_shift:
         return None
 
     outer_kb = line_to_v_of_u(orthogonal["outer_line"])
