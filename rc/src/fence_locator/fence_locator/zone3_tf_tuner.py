@@ -136,7 +136,7 @@ class Zone3TfTunerNode(Node):
         self.pause_request_in_flight = self.pause_client.call_async(TogglePaused.Request())
         return True
 
-    def restart_detection(self) -> list[str]:
+    def restart_detection(self, rewind_bag: bool = False) -> list[str]:
         missing = []
         if self.fence_reset_client.service_is_ready():
             self.restart_futures.append(self.fence_reset_client.call_async(Trigger.Request()))
@@ -146,18 +146,19 @@ class Zone3TfTunerNode(Node):
             self.restart_futures.append(self.uphill_reset_client.call_async(Trigger.Request()))
         else:
             missing.append("/uphill_state_node/reset")
-        if self.seek_client.service_is_ready():
-            req = Seek.Request()
-            sec = max(0.0, float(self.restart_seek_sec))
-            req.time.sec = int(sec)
-            req.time.nanosec = int((sec - int(sec)) * 1e9)
-            self.restart_futures.append(self.seek_client.call_async(req))
-        else:
-            missing.append("/rosbag2_player/seek")
-        if self.resume_client.service_is_ready():
-            self.restart_futures.append(self.resume_client.call_async(Resume.Request()))
-        else:
-            missing.append("/rosbag2_player/resume")
+        if rewind_bag:
+            if self.seek_client.service_is_ready():
+                req = Seek.Request()
+                sec = max(0.0, float(self.restart_seek_sec))
+                req.time.sec = int(sec)
+                req.time.nanosec = int((sec - int(sec)) * 1e9)
+                self.restart_futures.append(self.seek_client.call_async(req))
+            else:
+                missing.append("/rosbag2_player/seek")
+            if self.resume_client.service_is_ready():
+                self.restart_futures.append(self.resume_client.call_async(Resume.Request()))
+            else:
+                missing.append("/rosbag2_player/resume")
         return missing
 
     def collect_finished_restart_results(self) -> list[str]:
@@ -214,8 +215,11 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
         self.follow_box.setChecked(True)
         self.publish_box = QtWidgets.QCheckBox("发布校准 TF")
         self.publish_box.setChecked(True)
+        self.rewind_bag_box = QtWidgets.QCheckBox("同时倒回 bag")
+        self.rewind_bag_box.setChecked(False)
         row.addWidget(self.follow_box)
         row.addWidget(self.publish_box)
+        row.addWidget(self.rewind_bag_box)
         layout.addLayout(row)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -295,12 +299,15 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
             self.status_label.setText("未找到 /rosbag2_player/toggle_paused 服务")
 
     def restart_detection(self) -> None:
-        missing = self.node.restart_detection()
+        rewind_bag = self.rewind_bag_box.isChecked()
+        missing = self.node.restart_detection(rewind_bag=rewind_bag)
         self.restart_status_ticks = max(20, int(self.node.publish_rate_hz * 2.0))
         if missing:
             self.status_label.setText("重开请求已发，缺少服务: " + ", ".join(missing))
+        elif rewind_bag:
+            self.status_label.setText("重开请求已发：reset + seek/resume bag，RViz 时间回跳警告属预期")
         else:
-            self.status_label.setText("重开请求已发：reset uphill/fence + seek/resume bag")
+            self.status_label.setText("重开请求已发：只重置 uphill/fence，不倒回 bag")
 
     def read_source_once(self) -> None:
         self._on_frames_changed()
