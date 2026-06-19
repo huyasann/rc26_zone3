@@ -22,6 +22,8 @@ setup(
     entry_points={
         'console_scripts': [
             'fence_locator = fence_locator.fence_locator_node:main',
+            'pointcloud_hold = fence_locator.pointcloud_hold_node:main',
+            'zone3_tf_tuner = fence_locator.zone3_tf_tuner:main',
         ],
     },
 )

@@ -113,6 +113,9 @@ class FenceLocatorNode(Node):
         self.publish_zone3_root_tf = bool(
             self.declare_parameter("publish_zone3_root_tf", True).value
         )
+        self.zone3_root_frame = str(
+            self.declare_parameter("zone3_root_frame", "").value
+        ).strip()
         self.enable_zone3_field_marker = bool(
             self.declare_parameter("publish_zone3_field_marker", False).value
         )
@@ -129,13 +132,31 @@ class FenceLocatorNode(Node):
             self.declare_parameter("zone3_ransac_min_inliers", 35).value
         )
         self.zone3_model_key_x = float(
-            self.declare_parameter("zone3_model_key_x_m", 3.0).value
+            self.declare_parameter("zone3_model_key_x_m", 3.000).value
         )
         self.zone3_model_key_y = float(
-            self.declare_parameter("zone3_model_key_y_m", -1.4).value
+            self.declare_parameter("zone3_model_key_y_m", -1.400).value
         )
         self.zone3_model_key_z = float(
             self.declare_parameter("zone3_model_key_z_m", 0.45).value
+        )
+        self.zone3_edge_normal_offset = float(
+            self.declare_parameter("zone3_edge_normal_offset_m", 0.0).value
+        )
+        self.zone3_inner_corner_offset = float(
+            self.declare_parameter("zone3_inner_corner_offset_m", 0.0).value
+        )
+        self.zone3_root_calib_forward = float(
+            self.declare_parameter("zone3_root_calib_forward_m", 0.0).value
+        )
+        self.zone3_root_calib_lateral = float(
+            self.declare_parameter("zone3_root_calib_lateral_m", 0.0).value
+        )
+        self.zone3_root_calib_z = float(
+            self.declare_parameter("zone3_root_calib_z_m", 0.0).value
+        )
+        self.zone3_root_calib_yaw = math.radians(
+            float(self.declare_parameter("zone3_root_calib_yaw_deg", 0.0).value)
         )
         self.zone3_field_outer_len = float(
             self.declare_parameter("zone3_field_outer_len_m", 6.05).value
@@ -157,6 +178,39 @@ class FenceLocatorNode(Node):
         )
         self.zone3_model_side_depth = float(
             self.declare_parameter("zone3_model_side_depth_m", 2.75).value
+        )
+        self.enable_zone3_yaw_refine = bool(
+            self.declare_parameter("enable_zone3_yaw_refine", False).value
+        )
+        self.zone3_yaw_refine_range_deg = float(
+            self.declare_parameter("zone3_yaw_refine_range_deg", 3.0).value
+        )
+        self.zone3_yaw_refine_step_deg = float(
+            self.declare_parameter("zone3_yaw_refine_step_deg", 0.15).value
+        )
+        self.zone3_post_platform_cloud_frames = int(
+            self.declare_parameter("zone3_post_platform_cloud_frames", 12).value
+        )
+        self.enable_zone3_inside_refine = bool(
+            self.declare_parameter("enable_zone3_inside_refine", True).value
+        )
+        self.zone3_inside_refine_xy_range = float(
+            self.declare_parameter("zone3_inside_refine_xy_range_m", 0.08).value
+        )
+        self.zone3_inside_refine_xy_step = float(
+            self.declare_parameter("zone3_inside_refine_xy_step_m", 0.02).value
+        )
+        self.zone3_inside_refine_yaw_range = math.radians(
+            float(self.declare_parameter("zone3_inside_refine_yaw_range_deg", 0.6).value)
+        )
+        self.zone3_inside_refine_yaw_step = math.radians(
+            float(self.declare_parameter("zone3_inside_refine_yaw_step_deg", 0.2).value)
+        )
+        self.zone3_inside_refine_min_outside_ratio = float(
+            self.declare_parameter("zone3_inside_refine_min_outside_ratio", 0.08).value
+        )
+        self.zone3_inside_refine_min_outside_points = int(
+            self.declare_parameter("zone3_inside_refine_min_outside_points", 60).value
         )
         self.entry_forward_source = str(
             self.declare_parameter("entry_forward_source", "odom_start").value
@@ -203,6 +257,15 @@ class FenceLocatorNode(Node):
         self.bottom_corner_reason = "not_run"
         self.zone3_corner: dict | None = None
         self.zone3_corner_reason = "not_run"
+        self.zone3_yaw_refine_delta = 0.0
+        self.zone3_yaw_refine_score = 0.0
+        self.zone3_inside_score = 0.0
+        self.zone3_inside_points = 0
+        self.zone3_outside_points = 0
+        self.zone3_outside_ratio = 1.0
+        self.zone3_inside_refine_dx = 0.0
+        self.zone3_inside_refine_dy = 0.0
+        self.zone3_inside_refine_dyaw = 0.0
 
         self.stop_keyboard = False
         self.shutdown_requested = False
@@ -214,6 +277,8 @@ class FenceLocatorNode(Node):
         self.collection_log_once = False
         self.collection_reset_done = False
         self.zone3_root_tf_log_once = False
+        self.zone3_collect_after_platform = False
+        self.zone3_platform_cloud_frames = 0
 
         self.create_subscription(String, "/uphill/state", self.on_state, 10)
         self.create_subscription(PoseStamped, "/uphill/transition_pose", self.on_transition_pose, 10)
@@ -287,6 +352,43 @@ class FenceLocatorNode(Node):
         )
         self.pending_transition_pose = (t, float(pos.x), float(pos.y), float(pos.z), yaw)
 
+    def _reset_zone3_cloud_cache(self, reason: str) -> None:
+        self.cloud_samples.clear()
+        self.cloud_sample_points = 0
+        self.cloud_ransac_line = None
+        self.cloud_ransac_reason = reason
+        self.bottom_corner = None
+        self.bottom_corner_reason = reason
+        self.zone3_corner = None
+        self.zone3_corner_reason = reason
+        self.cloud_lateral_correction = 0.0
+        self.zone3_root_tf_log_once = False
+        self.zone3_yaw_refine_delta = 0.0
+        self.zone3_yaw_refine_score = 0.0
+        self.zone3_inside_score = 0.0
+        self.zone3_inside_points = 0
+        self.zone3_outside_points = 0
+        self.zone3_outside_ratio = 1.0
+        self.zone3_inside_refine_dx = 0.0
+        self.zone3_inside_refine_dy = 0.0
+        self.zone3_inside_refine_dyaw = 0.0
+
+    def _finish_platform_cloud_collection(self) -> None:
+        if self.finalized:
+            return
+        self.zone3_collect_after_platform = False
+        self.enabled = False
+        self.lateral_detection_enabled = False
+        self.finalized = True
+        self.collection_reset_done = False
+        self.get_logger().info(
+            "stop post-platform point cloud collection, "
+            f"frames={self.zone3_platform_cloud_frames}, "
+            f"samples={self.cloud_sample_points}, "
+            f"cloud={self.cloud_seen}, analyzed={self.cloud_analyzed}"
+        )
+        self.fuse_and_publish()
+
     def on_state(self, msg: String) -> None:
         new_state = msg.data.strip()
         if new_state == self.last_state_pub:
@@ -322,16 +424,9 @@ class FenceLocatorNode(Node):
             )
             self.ramp_odom_points = self._backtracked_odom_points()
             self.collect_ramp_odom = True
-            self.cloud_samples.clear()
-            self.cloud_sample_points = 0
-            self.cloud_ransac_line = None
-            self.cloud_ransac_reason = "reset"
-            self.bottom_corner = None
-            self.bottom_corner_reason = "reset"
-            self.zone3_corner = None
-            self.zone3_corner_reason = "reset"
-            self.cloud_lateral_correction = 0.0
-            self.zone3_root_tf_log_once = False
+            self._reset_zone3_cloud_cache("reset")
+            self.zone3_collect_after_platform = False
+            self.zone3_platform_cloud_frames = 0
             self.collection_reset_done = True
             self.lateral_ests.clear()
             self.trusted_count = 0
@@ -347,18 +442,19 @@ class FenceLocatorNode(Node):
             self.lateral_detection_enabled = False
             self.finalized = False
             self.collection_log_once = False
-            self.get_logger().info("start collecting point cloud from pitch-change window")
+            self.get_logger().info("waiting for platform before zone3 point cloud collection")
         elif self.state == "uphill":
             if not self.collection_reset_done:
                 self._start_collection_from_transition("confirmed ramp")
+                self._reset_zone3_cloud_cache("reset_before_platform")
             self.enabled = True
-            self.lateral_detection_enabled = True
+            self.lateral_detection_enabled = False
             if not self.collection_log_once:
                 self.collection_log_once = True
-                self.get_logger().info("start collecting point cloud")
+                self.get_logger().info("ramp confirmed, zone3 point cloud collection still waiting for platform")
         elif self.state == "uphill_to_platform":
             self.enabled = True
-            self.lateral_detection_enabled = True
+            self.lateral_detection_enabled = False
         elif self.state == "platform":
             if self.finalized:
                 return
@@ -370,13 +466,15 @@ class FenceLocatorNode(Node):
             self.collection_reset_done = False
             self.enabled = False
             self.lateral_detection_enabled = False
+            self._reset_zone3_cloud_cache("post_platform_reset")
+            self.zone3_collect_after_platform = True
+            self.zone3_platform_cloud_frames = 0
+            self.enabled = True
+            self.lateral_detection_enabled = False
+            self.finalized = False
             self.get_logger().info(
-                "stop collecting, "
-                f"cloud={self.cloud_seen}, analyzed={self.cloud_analyzed}, "
-                f"detections={len(self.lateral_ests)}, two_side={self.two_side_count}, "
-                f"last_corridor={self.last_corridor_points}, last_peaks={self.last_candidate_peaks}"
+                f"start post-platform point cloud collection, target_frames={self.zone3_post_platform_cloud_frames}"
             )
-            self.fuse_and_publish()
 
     def _start_collection_from_transition(self, reason: str) -> None:
         if self.ground_z is not None:
@@ -430,7 +528,7 @@ class FenceLocatorNode(Node):
         self.lateral_detection_enabled = False
         self.finalized = False
         self.collection_log_once = False
-        self.get_logger().info(f"start collecting point cloud from {reason}")
+        self.get_logger().info(f"prepared ramp pose from {reason}, waiting for platform before zone3 cloud collection")
 
     def _take_transition_start_pose(self) -> tuple[float, float, float, float] | None:
         if self.pending_transition_pose is None:
@@ -456,7 +554,12 @@ class FenceLocatorNode(Node):
         xv = x[valid]
         yv = y[valid]
         zv = z[valid]
-        self._cache_cloud_points(xv, yv, zv)
+        if self.zone3_collect_after_platform:
+            self._cache_cloud_points(xv, yv, zv)
+            self.zone3_platform_cloud_frames += 1
+            if self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames):
+                self._finish_platform_cloud_collection()
+            return
         if not self.lateral_detection_enabled:
             return
         result = self.detect_fence_single(xv, yv, zv)
@@ -716,7 +819,20 @@ class FenceLocatorNode(Node):
                 f"angle={corner['angle_deg']:.1f}deg, "
                 f"vertical_n={corner['vertical_count']}, vertical_span={corner['vertical_span']:.3f}m, "
                 f"outer_rmse={corner['outer_rmse']:.3f}, far_rmse={corner['far_rmse']:.3f}, "
-                f"refined={corner.get('refined', False)}, "
+                f"refined={corner.get('refined', False)}, source={corner.get('ransac_source', '-')}, "
+                f"shift={corner.get('refine_shift', 0.0):.3f}m, "
+                f"yaw_weight far/outer={self._zone3_line_weight('far'):.1f}/{self._zone3_line_weight('outer'):.1f}, "
+                f"yaw_refine={math.degrees(self.zone3_yaw_refine_delta):+.2f}deg, "
+                f"edge_offset={self.zone3_edge_normal_offset:+.3f}m, "
+                f"root_calib=({self.zone3_root_calib_forward:+.3f},"
+                f"{self.zone3_root_calib_lateral:+.3f},"
+                f"{self.zone3_root_calib_z:+.3f},"
+                f"{math.degrees(self.zone3_root_calib_yaw):+.2f}deg), "
+                f"inside={self.zone3_inside_points}, outside={self.zone3_outside_points}, "
+                f"out_ratio={self.zone3_outside_ratio:.2f}, "
+                f"inside_refine=({self.zone3_inside_refine_dx:+.3f},"
+                f"{self.zone3_inside_refine_dy:+.3f},"
+                f"{math.degrees(self.zone3_inside_refine_dyaw):+.2f}deg), "
                 f"outer_inliers={corner.get('outer_bins', 0)}, far_inliers={corner.get('far_bins', 0)}, "
                 f"side={corner['side']}"
             )
@@ -1367,11 +1483,17 @@ class FenceLocatorNode(Node):
         return float(k), float(b), rmse
 
     def _fit_zone3_corner_from_cloud(self) -> None:
+        forced_corner_side = None
+        if self.field_side == "blue":
+            forced_corner_side = "positive"
+        elif self.field_side == "red":
+            forced_corner_side = "negative"
         config = Zone3CornerConfig(
             enable_ransac_refine=self.enable_zone3_ransac_refine,
             ransac_radius=self.zone3_ransac_radius,
             ransac_dist_thr=self.zone3_ransac_dist_thr,
             ransac_min_inliers=self.zone3_ransac_min_inliers,
+            forced_side=forced_corner_side,
         )
         self.zone3_corner, self.zone3_corner_reason = fit_zone3_corner_from_samples(
             self.cloud_samples,
@@ -1394,7 +1516,27 @@ class FenceLocatorNode(Node):
     def _angle_mean(a: float, b: float) -> float:
         return math.atan2(math.sin(a) + math.sin(b), math.cos(a) + math.cos(b))
 
-    def _zone3_root_pose_from_corner(self) -> tuple[float, float, float, float] | None:
+    @staticmethod
+    def _angle_weighted_mean(a: float, wa: float, b: float, wb: float) -> float:
+        x = math.cos(a) * wa + math.cos(b) * wb
+        y = math.sin(a) * wa + math.sin(b) * wb
+        if abs(x) < 1e-9 and abs(y) < 1e-9:
+            return math.atan2(math.sin(a) + math.sin(b), math.cos(a) + math.cos(b))
+        return math.atan2(y, x)
+
+    def _zone3_line_weight(self, prefix: str) -> float:
+        if self.zone3_corner is None:
+            return 1.0
+        span = float(self.zone3_corner.get(f"ransac_{prefix}_span", 0.0))
+        points = float(self.zone3_corner.get(f"ransac_{prefix}_points", 0.0))
+        inliers = float(self.zone3_corner.get(f"{prefix}_bins", 0.0))
+        rmse = float(self.zone3_corner.get(f"{prefix}_rmse", 0.08))
+        support = max(points, inliers, 1.0)
+        clean = 1.0 / max(0.015, rmse)
+        weight = max(0.15, span) * math.sqrt(support) * clean
+        return max(0.05, min(1000.0, weight))
+
+    def _zone3_axes_from_corner(self) -> tuple[np.ndarray, np.ndarray, float] | None:
         if self.zone3_corner is None or self.locked_pose is None:
             return None
         base_x, base_y, _base_z, model_yaw = self.locked_pose
@@ -1402,18 +1544,312 @@ class FenceLocatorNode(Node):
         cv = float(self.zone3_corner["corner_v"])
         outer_k = float(self.zone3_corner["outer_k"])
         far_k = float(self.zone3_corner["far_k"])
-        centroid_u = float(self.zone3_corner.get("centroid_u", cu))
-        centroid_v = float(self.zone3_corner.get("centroid_v", cv))
-        to_cloud = np.asarray([centroid_u - cu, centroid_v - cv], dtype=np.float64)
 
         axis_outer = np.asarray([1.0, outer_k], dtype=np.float64)
         axis_outer /= max(1e-6, float(np.linalg.norm(axis_outer)))
         axis_far = np.asarray([far_k, 1.0], dtype=np.float64)
         axis_far /= max(1e-6, float(np.linalg.norm(axis_far)))
-        if float(np.dot(to_cloud, axis_outer)) < 0.0:
-            axis_outer = -axis_outer
-        if float(np.dot(to_cloud, axis_far)) < 0.0:
-            axis_far = -axis_far
+
+        # 红线方向对应 far edge，蓝线方向对应 outer edge。RANSAC 可以各自有小角度误差，
+        # 但场地坐标轴必须正交：用可信度更高的一条作为主轴，另一条强制取 90 度垂线。
+        far_weight = self._zone3_line_weight("far")
+        outer_weight = self._zone3_line_weight("outer")
+        if far_weight >= outer_weight:
+            axis_x_seed = axis_far
+            axis_y_seed = np.asarray([-axis_x_seed[1], axis_x_seed[0]], dtype=np.float64)
+            if float(np.dot(axis_y_seed, axis_outer)) < 0.0:
+                axis_y_seed = -axis_y_seed
+        else:
+            axis_y_seed = axis_outer
+            axis_x_seed = np.asarray([axis_y_seed[1], -axis_y_seed[0]], dtype=np.float64)
+            if float(np.dot(axis_x_seed, axis_far)) < 0.0:
+                axis_x_seed = -axis_x_seed
+        axis_x_seed /= max(1e-6, float(np.linalg.norm(axis_x_seed)))
+        axis_y_seed /= max(1e-6, float(np.linalg.norm(axis_y_seed)))
+
+        points_local: np.ndarray | None = None
+        if self.cloud_samples:
+            pts = np.concatenate(self.cloud_samples, axis=0)
+            if len(pts) > 0:
+                dx = pts[:, 0] - base_x
+                dy = pts[:, 1] - base_y
+                u = dx * math.cos(model_yaw) + dy * math.sin(model_yaw)
+                v = -dx * math.sin(model_yaw) + dy * math.cos(model_yaw)
+                z = pts[:, 2]
+                cz = float(self.zone3_corner.get("corner_z", np.nan))
+                keep = np.isfinite(u) & np.isfinite(v) & (np.abs(u - cu) <= 7.0) & (np.abs(v - cv) <= 4.0)
+                if np.isfinite(cz):
+                    keep = keep & np.isfinite(z) & (z >= cz - 0.45) & (z <= cz + 0.45)
+                if int(keep.sum()) > 0:
+                    points_local = np.column_stack((u[keep], v[keep]))
+
+        total_len = self.zone3_model_side_len + self.zone3_model_main_len
+        main_depth = self.zone3_model_main_depth
+        side_depth = self.zone3_model_side_depth
+
+        def score_axes(axis_x: np.ndarray, axis_y: np.ndarray) -> float:
+            if points_local is None:
+                centroid_u = float(self.zone3_corner.get("centroid_u", cu))
+                centroid_v = float(self.zone3_corner.get("centroid_v", cv))
+                rel = np.asarray([centroid_u - cu, centroid_v - cv], dtype=np.float64)
+                return float(np.dot(rel, axis_x) + np.dot(rel, axis_y))
+            rel = points_local - np.asarray([cu, cv], dtype=np.float64)
+            px = rel @ axis_x
+            py = rel @ axis_y
+            max_depth = np.where(px <= self.zone3_model_side_len, side_depth, main_depth)
+            inside = (px >= -0.08) & (px <= total_len + 0.08) & (py >= -0.08) & (py <= max_depth + 0.08)
+            near_x_edge = (np.abs(py) <= 0.16) & (px >= -0.10) & (px <= total_len + 0.10)
+            near_y_edge = (np.abs(px) <= 0.16) & (py >= -0.10) & (py <= side_depth + 0.10)
+            opposite = (px < -0.25) | (py < -0.25)
+            return float(inside.sum()) + 1.5 * float(near_x_edge.sum()) + 1.5 * float(near_y_edge.sum()) - 0.25 * float(opposite.sum())
+
+        best: tuple[float, np.ndarray, np.ndarray] | None = None
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                axis_x = axis_x_seed * sx
+                axis_y = axis_y_seed * sy
+                score = score_axes(axis_x, axis_y)
+                if best is None or score > best[0]:
+                    best = (score, axis_x, axis_y)
+        if best is None:
+            return None
+        return best[1], best[2], best[0]
+
+    def _zone3_inner_anchor_local(self, axis_x: np.ndarray, axis_y: np.ndarray) -> np.ndarray | None:
+        if self.zone3_corner is None:
+            return None
+        cu = float(self.zone3_corner["corner_u"])
+        cv = float(self.zone3_corner["corner_v"])
+        offset = max(0.0, float(self.zone3_inner_corner_offset))
+        if offset <= 1e-6:
+            return np.asarray([cu, cv], dtype=np.float64)
+        inward = axis_x + axis_y
+        norm = float(np.linalg.norm(inward))
+        if norm < 1e-6:
+            return np.asarray([cu, cv], dtype=np.float64)
+        inward /= norm
+        return np.asarray([cu, cv], dtype=np.float64) + inward * offset
+
+    def _refine_zone3_root_yaw(self, root_yaw: float, key_x: float, key_y: float) -> float:
+        self.zone3_yaw_refine_delta = 0.0
+        self.zone3_yaw_refine_score = 0.0
+        if (not self.enable_zone3_yaw_refine) or self.zone3_corner is None or not self.cloud_samples:
+            return root_yaw
+        points = np.concatenate(self.cloud_samples, axis=0)
+        if len(points) < 300:
+            return root_yaw
+
+        cloud_x = float(self.zone3_corner["corner_x"])
+        cloud_y = float(self.zone3_corner["corner_y"])
+        cloud_z = float(self.zone3_corner.get("corner_z", np.nan))
+        total_len = self.zone3_model_side_len + self.zone3_model_main_len
+        main_depth = self.zone3_model_main_depth
+        side_depth = self.zone3_model_side_depth
+        range_rad = math.radians(max(0.0, self.zone3_yaw_refine_range_deg))
+        step_rad = math.radians(max(0.03, self.zone3_yaw_refine_step_deg))
+        if range_rad <= 1e-6:
+            return root_yaw
+
+        z = points[:, 2]
+        keep = np.isfinite(points[:, 0]) & np.isfinite(points[:, 1])
+        if np.isfinite(cloud_z):
+            keep = keep & np.isfinite(z) & (z >= cloud_z - 0.45) & (z <= cloud_z + 0.45)
+        pts = points[keep]
+        if len(pts) < 300:
+            return root_yaw
+        if len(pts) > 8000:
+            pts = pts[:: max(1, len(pts) // 8000)]
+
+        offsets = np.arange(-range_rad, range_rad + step_rad * 0.5, step_rad)
+        best_yaw = root_yaw
+        best_score = -1.0e18
+        for delta in offsets:
+            yaw = root_yaw + float(delta)
+            root_x = cloud_x - (math.cos(yaw) * key_x - math.sin(yaw) * key_y)
+            root_y = cloud_y - (math.sin(yaw) * key_x + math.cos(yaw) * key_y)
+            dx = pts[:, 0] - root_x
+            dy = pts[:, 1] - root_y
+            local_x = dx * math.cos(yaw) + dy * math.sin(yaw)
+            local_y = -dx * math.sin(yaw) + dy * math.cos(yaw)
+            a = key_x - local_x
+            b = local_y - key_y
+            max_depth = np.where(a <= self.zone3_model_side_len, side_depth, main_depth)
+            inside = (a >= -0.15) & (a <= total_len + 0.15) & (b >= -0.15) & (b <= max_depth + 0.15)
+            edge_x = inside & (np.abs(b) <= 0.18)
+            edge_y = inside & (np.abs(a) <= 0.18) & (b <= side_depth + 0.20)
+            if int(edge_x.sum() + edge_y.sum()) < 20:
+                continue
+            dist = np.minimum(np.abs(b), np.abs(a))
+            edge_mask = edge_x | edge_y
+            clipped = np.minimum(dist[edge_mask], 0.30)
+            score = (
+                2.0 * float(edge_x.sum())
+                + 2.0 * float(edge_y.sum())
+                + 0.10 * float(inside.sum())
+                - 35.0 * float(np.mean(clipped))
+            )
+            if score > best_score:
+                best_score = score
+                best_yaw = yaw
+
+        if best_score > -1.0e17:
+            self.zone3_yaw_refine_delta = best_yaw - root_yaw
+            self.zone3_yaw_refine_score = best_score
+            return best_yaw
+        return root_yaw
+
+    def _zone3_field_mask(self, local_x: np.ndarray, local_y: np.ndarray, margin: float) -> np.ndarray:
+        if self._active_side() == "red":
+            local_x = -local_x
+        main_x0 = -3.0 - margin
+        main_x1 = 1.5 + margin
+        main_y0 = -1.45 - margin
+        main_y1 = 1.15 + margin
+        side_x0 = 1.5 - margin
+        side_x1 = 3.05 + margin
+        side_y0 = -1.45 - margin
+        side_y1 = 1.30 + margin
+        main = (local_x >= main_x0) & (local_x <= main_x1) & (local_y >= main_y0) & (local_y <= main_y1)
+        side = (local_x >= side_x0) & (local_x <= side_x1) & (local_y >= side_y0) & (local_y <= side_y1)
+        return main | side
+
+    def _zone3_field_fit_score(
+        self,
+        root_x: float,
+        root_y: float,
+        root_yaw: float,
+        cloud_z: float,
+    ) -> dict:
+        if not self.cloud_samples:
+            return {"score": -1.0e18, "inside": 0, "outside": 0, "outside_ratio": 1.0}
+        pts = np.concatenate(self.cloud_samples, axis=0)
+        if len(pts) < 200:
+            return {"score": -1.0e18, "inside": 0, "outside": 0, "outside_ratio": 1.0}
+        keep = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]) & np.isfinite(pts[:, 2])
+        if np.isfinite(cloud_z):
+            keep = keep & (pts[:, 2] >= cloud_z - 0.35) & (pts[:, 2] <= cloud_z + 0.45)
+        pts = pts[keep]
+        if len(pts) < 200:
+            return {"score": -1.0e18, "inside": 0, "outside": 0, "outside_ratio": 1.0}
+        if len(pts) > 9000:
+            pts = pts[:: max(1, len(pts) // 9000)]
+
+        dx = pts[:, 0] - root_x
+        dy = pts[:, 1] - root_y
+        local_x = dx * math.cos(root_yaw) + dy * math.sin(root_yaw)
+        local_y = -dx * math.sin(root_yaw) + dy * math.cos(root_yaw)
+
+        # 只评价场地附近的点，避免远处墙面/人群影响评分。
+        near = self._zone3_field_mask(local_x, local_y, margin=0.45)
+        if int(near.sum()) < 80:
+            near = self._zone3_field_mask(local_x, local_y, margin=0.75)
+        if int(near.sum()) < 80:
+            return {"score": -1.0e18, "inside": 0, "outside": 0, "outside_ratio": 1.0}
+
+        inside = self._zone3_field_mask(local_x, local_y, margin=0.06) & near
+        relaxed_inside = self._zone3_field_mask(local_x, local_y, margin=0.18) & near
+        hard_inside = self._zone3_field_mask(local_x, local_y, margin=0.30) & near
+        outside = near & (~relaxed_inside)
+        hard_outside = near & (~hard_inside)
+
+        lx = local_x[near]
+        ly = local_y[near]
+        # 鼓励点云靠近可见边界，同时强惩罚跑到场地外侧。
+        edge_y_min = np.abs(ly + 1.45) <= 0.16
+        edge_x_pos = np.abs(lx - 3.00) <= 0.16
+        edge_x_joint = np.abs(lx - 1.50) <= 0.16
+        edge_bonus = int(edge_y_min.sum()) + int(edge_x_pos.sum()) + 0.5 * int(edge_x_joint.sum())
+
+        inside_count = int(inside.sum())
+        outside_count = int(outside.sum())
+        hard_outside_count = int(hard_outside.sum())
+        outside_ratio = outside_count / max(1, inside_count + outside_count)
+        score = (
+            3.0 * inside_count
+            + 1.2 * float(edge_bonus)
+            - 8.0 * outside_count
+            - 14.0 * hard_outside_count
+            - 250.0 * outside_ratio
+        )
+        return {
+            "score": float(score),
+            "inside": inside_count,
+            "outside": outside_count,
+            "outside_ratio": float(outside_ratio),
+        }
+
+    def _refine_zone3_root_by_inside_constraint(
+        self,
+        root_x: float,
+        root_y: float,
+        root_z: float,
+        root_yaw: float,
+        cloud_z: float,
+    ) -> tuple[float, float, float]:
+        self.zone3_inside_refine_dx = 0.0
+        self.zone3_inside_refine_dy = 0.0
+        self.zone3_inside_refine_dyaw = 0.0
+        current = self._zone3_field_fit_score(root_x, root_y, root_yaw, cloud_z)
+        best_score = float(current["score"])
+        best = (root_x, root_y, root_yaw, 0.0, 0.0, 0.0, current)
+        self.zone3_inside_score = best_score
+        self.zone3_inside_points = int(current["inside"])
+        self.zone3_outside_points = int(current["outside"])
+        self.zone3_outside_ratio = float(current["outside_ratio"])
+        if (
+            (not self.enable_zone3_inside_refine)
+            or best_score <= -1.0e17
+            or (
+                self.zone3_outside_ratio <= self.zone3_inside_refine_min_outside_ratio
+                and self.zone3_outside_points <= self.zone3_inside_refine_min_outside_points
+            )
+        ):
+            return root_x, root_y, root_yaw
+
+        xy_range = max(0.0, float(self.zone3_inside_refine_xy_range))
+        xy_step = max(0.01, float(self.zone3_inside_refine_xy_step))
+        yaw_range = max(0.0, float(self.zone3_inside_refine_yaw_range))
+        yaw_step = max(math.radians(0.05), float(self.zone3_inside_refine_yaw_step))
+        dx_values = np.arange(-xy_range, xy_range + xy_step * 0.5, xy_step)
+        dy_values = np.arange(-xy_range, xy_range + xy_step * 0.5, xy_step)
+        yaw_values = np.arange(-yaw_range, yaw_range + yaw_step * 0.5, yaw_step)
+
+        for dyaw in yaw_values:
+            yaw = root_yaw + float(dyaw)
+            cy = math.cos(yaw)
+            sy = math.sin(yaw)
+            for local_dx in dx_values:
+                for local_dy in dy_values:
+                    cand_x = root_x + cy * float(local_dx) - sy * float(local_dy)
+                    cand_y = root_y + sy * float(local_dx) + cy * float(local_dy)
+                    stats = self._zone3_field_fit_score(cand_x, cand_y, yaw, cloud_z)
+                    move_cost = 35.0 * math.hypot(float(local_dx), float(local_dy)) + 6.0 * abs(math.degrees(float(dyaw)))
+                    score = float(stats["score"]) - move_cost
+                    if score > best_score:
+                        best_score = score
+                        best = (cand_x, cand_y, yaw, float(local_dx), float(local_dy), float(dyaw), stats)
+
+        best_x, best_y, best_yaw, best_dx, best_dy, best_dyaw, best_stats = best
+        self.zone3_inside_score = float(best_stats["score"])
+        self.zone3_inside_points = int(best_stats["inside"])
+        self.zone3_outside_points = int(best_stats["outside"])
+        self.zone3_outside_ratio = float(best_stats["outside_ratio"])
+        self.zone3_inside_refine_dx = best_dx
+        self.zone3_inside_refine_dy = best_dy
+        self.zone3_inside_refine_dyaw = best_dyaw
+        return best_x, best_y, best_yaw
+
+    def _zone3_root_pose_from_corner(self) -> tuple[float, float, float, float] | None:
+        if self.zone3_corner is None or self.locked_pose is None:
+            return None
+        _base_x, _base_y, _base_z, model_yaw = self.locked_pose
+        axes = self._zone3_axes_from_corner()
+        if axes is None:
+            return None
+        axis_x, axis_y, _axis_score = axes
+        anchor_local = self._zone3_inner_anchor_local(axis_x, axis_y)
+        if anchor_local is None:
+            return None
 
         def local_vec_to_odom(vec: np.ndarray) -> np.ndarray:
             return np.asarray(
@@ -1427,23 +1863,62 @@ class FenceLocatorNode(Node):
         # 对蓝区当前确认的模型点：
         # root 下关键点为 (3.000, -1.400, 0.450)。
         # 从该点进入场地的两条边，近似对应 root 的 -X 与 +Y。
-        root_x_axis = local_vec_to_odom(axis_far)
-        root_y_axis = local_vec_to_odom(axis_outer)
+        root_x_axis = -local_vec_to_odom(axis_x)
+        root_y_axis = local_vec_to_odom(axis_y)
         yaw_from_x = math.atan2(float(root_x_axis[1]), float(root_x_axis[0]))
         yaw_from_y = math.atan2(float(root_y_axis[1]), float(root_y_axis[0])) - math.pi / 2.0
-        root_yaw = self._angle_mean(yaw_from_x, yaw_from_y) + math.pi / 2.0
+        weight_x = self._zone3_line_weight("far")
+        weight_y = self._zone3_line_weight("outer")
+        root_yaw = self._angle_weighted_mean(yaw_from_x, weight_x, yaw_from_y, weight_y)
 
         cloud_x = float(self.zone3_corner["corner_x"])
         cloud_y = float(self.zone3_corner["corner_y"])
         cloud_z = float(self.zone3_corner["corner_z"])
+        raw_local = np.asarray(
+            [float(self.zone3_corner["corner_u"]), float(self.zone3_corner["corner_v"])],
+            dtype=np.float64,
+        )
+        inner_shift_local = anchor_local - raw_local
+        inner_shift_odom = local_vec_to_odom(inner_shift_local)
+        cloud_x += float(inner_shift_odom[0])
+        cloud_y += float(inner_shift_odom[1])
+        if abs(self.zone3_edge_normal_offset) > 1e-6:
+            anchor_shift = local_vec_to_odom((axis_x + axis_y) * self.zone3_edge_normal_offset)
+            cloud_x += float(anchor_shift[0])
+            cloud_y += float(anchor_shift[1])
 
         side = self._active_side()
         key_x = self.zone3_model_key_x if side == "blue" else -self.zone3_model_key_x
         key_y = self.zone3_model_key_y
         key_z = self.zone3_model_key_z
+        root_yaw = self._refine_zone3_root_yaw(root_yaw, key_x, key_y)
         root_x = cloud_x - (math.cos(root_yaw) * key_x - math.sin(root_yaw) * key_y)
         root_y = cloud_y - (math.sin(root_yaw) * key_x + math.cos(root_yaw) * key_y)
         root_z = cloud_z - key_z
+        if (
+            abs(self.zone3_root_calib_forward) > 1e-6
+            or abs(self.zone3_root_calib_lateral) > 1e-6
+            or abs(self.zone3_root_calib_z) > 1e-6
+            or abs(self.zone3_root_calib_yaw) > 1e-6
+        ):
+            corrected_yaw = root_yaw + self.zone3_root_calib_yaw
+            root_x += (
+                math.cos(corrected_yaw) * self.zone3_root_calib_forward
+                - math.sin(corrected_yaw) * self.zone3_root_calib_lateral
+            )
+            root_y += (
+                math.sin(corrected_yaw) * self.zone3_root_calib_forward
+                + math.cos(corrected_yaw) * self.zone3_root_calib_lateral
+            )
+            root_z += self.zone3_root_calib_z
+            root_yaw = corrected_yaw
+        root_x, root_y, root_yaw = self._refine_zone3_root_by_inside_constraint(
+            root_x,
+            root_y,
+            root_z,
+            root_yaw,
+            cloud_z,
+        )
         return root_x, root_y, root_z, root_yaw
 
     def publish_zone3_root_transform(self) -> None:
@@ -1457,7 +1932,7 @@ class FenceLocatorNode(Node):
         tf = TransformStamped()
         tf.header.stamp = self.get_clock().now().to_msg()
         tf.header.frame_id = "odom"
-        tf.child_frame_id = f"{side}_zone3_root"
+        tf.child_frame_id = self.zone3_root_frame or f"{side}_zone3_root"
         tf.transform.translation.x = float(root_x)
         tf.transform.translation.y = float(root_y)
         tf.transform.translation.z = float(root_z)
@@ -1904,6 +2379,10 @@ class FenceLocatorNode(Node):
     def publish_zone3_corner_marker(self) -> None:
         if self.zone3_corner is None or self.locked_pose is None:
             return
+        axes = self._zone3_axes_from_corner()
+        if axes is None:
+            return
+        axis_x, axis_y, _axis_score = axes
         base_x, base_y, base_z, model_yaw = self.locked_pose
         line_z = float(self.zone3_corner["corner_z"]) + self.marker_z_offset
         ground_z = self._marker_ground_z(base_z)
@@ -1916,6 +2395,16 @@ class FenceLocatorNode(Node):
             point.y = base_y + math.sin(model_yaw) * forward + math.cos(model_yaw) * lateral
             point.z = z_value
             return point
+
+        def local_xy_point(local_xy: np.ndarray, z_value: float) -> Point:
+            return local_point(float(local_xy[0]), float(local_xy[1]), z_value)
+
+        cu = float(self.zone3_corner["corner_u"])
+        cv = float(self.zone3_corner["corner_v"])
+        corner_local = np.asarray([cu, cv], dtype=np.float64)
+        anchor_local = self._zone3_inner_anchor_local(axis_x, axis_y)
+        if anchor_local is None:
+            anchor_local = corner_local
 
         # 蓝线：水平边 1
         outer = Marker()
@@ -1931,10 +2420,8 @@ class FenceLocatorNode(Node):
         outer.color.b = 1.0
         outer.color.a = 0.95
         outer.pose.orientation.w = 1.0
-        ok = float(self.zone3_corner["outer_k"])
-        ob = float(self.zone3_corner["outer_b"])
-        for forward in (0.55, 2.85):
-            outer.points.append(local_point(forward, ok * forward + ob, line_z))
+        for dist in (-0.20, 2.50):
+            outer.points.append(local_xy_point(corner_local + axis_y * dist, line_z))
         self.pub_marker.publish(outer)
 
         # 红线：水平边 2，和蓝线接近 90 度
@@ -1951,11 +2438,30 @@ class FenceLocatorNode(Node):
         far.color.b = 0.0
         far.color.a = 0.95
         far.pose.orientation.w = 1.0
-        fk = float(self.zone3_corner["far_k"])
-        fb = float(self.zone3_corner["far_b"])
-        for lateral in (-1.35, 1.35):
-            far.points.append(local_point(fk * lateral + fb, lateral, line_z))
+        for dist in (-1.35, 1.35):
+            far.points.append(local_xy_point(corner_local + axis_x * dist, line_z))
         self.pub_marker.publish(far)
+
+        raw_corner = Marker()
+        raw_corner.header.frame_id = "odom"
+        raw_corner.header.stamp = outer.header.stamp
+        raw_corner.ns = "ramp_model"
+        raw_corner.id = 45
+        raw_corner.type = Marker.SPHERE
+        raw_corner.action = Marker.ADD
+        raw_corner.scale.x = 0.045
+        raw_corner.scale.y = 0.045
+        raw_corner.scale.z = 0.045
+        raw_corner.color.r = 1.0
+        raw_corner.color.g = 0.55
+        raw_corner.color.b = 0.0
+        raw_corner.color.a = 0.95
+        raw_corner.pose.orientation.w = 1.0
+        raw_point = local_xy_point(corner_local, line_z)
+        raw_corner.pose.position.x = raw_point.x
+        raw_corner.pose.position.y = raw_point.y
+        raw_corner.pose.position.z = raw_point.z
+        self.pub_marker.publish(raw_corner)
 
         # 红点：蓝红交点
         corner = Marker()
@@ -1973,9 +2479,10 @@ class FenceLocatorNode(Node):
         corner.color.b = 0.0
         corner.color.a = 1.0
         corner.pose.orientation.w = 1.0
-        corner.pose.position.x = float(self.zone3_corner["corner_x"])
-        corner.pose.position.y = float(self.zone3_corner["corner_y"])
-        corner.pose.position.z = line_z
+        anchor_point = local_xy_point(anchor_local, line_z)
+        corner.pose.position.x = anchor_point.x
+        corner.pose.position.y = anchor_point.y
+        corner.pose.position.z = anchor_point.z
         self.pub_marker.publish(corner)
 
         # 紫线：竖向支撑，表示这个 XY 附近确实有 Z 方向点列。
@@ -1996,8 +2503,6 @@ class FenceLocatorNode(Node):
         high = float(self.zone3_corner.get("vertical_z_high", line_z + 0.05))
         if not np.isfinite(low) or not np.isfinite(high) or high <= low:
             low, high = line_z - 0.05, line_z + 0.05
-        cu = float(self.zone3_corner["corner_u"])
-        cv = float(self.zone3_corner["corner_v"])
         vertical.points.append(local_point(cu, cv, low))
         vertical.points.append(local_point(cu, cv, high))
         self.pub_marker.publish(vertical)
@@ -2005,6 +2510,13 @@ class FenceLocatorNode(Node):
     def publish_zone3_field_marker(self) -> None:
         if (not self.enable_zone3_field_marker) or self.zone3_corner is None or self.locked_pose is None:
             return
+        root_pose = self._zone3_root_pose_from_corner()
+        if root_pose is None:
+            return
+        selected_axes = self._zone3_axes_from_corner()
+        if selected_axes is None:
+            return
+        selected_axis_x, selected_axis_y, _axis_score = selected_axes
         base_x, base_y, base_z, model_yaw = self.locked_pose
         ground_z = self._marker_ground_z(base_z)
         z_value = float(self.zone3_corner.get("corner_z", ground_z)) + self.marker_z_offset + 0.025
@@ -2013,6 +2525,9 @@ class FenceLocatorNode(Node):
 
         cu = float(self.zone3_corner["corner_u"])
         cv = float(self.zone3_corner["corner_v"])
+        anchor_local = self._zone3_inner_anchor_local(selected_axis_x, selected_axis_y)
+        if anchor_local is None:
+            anchor_local = np.asarray([cu, cv], dtype=np.float64)
         outer_k = float(self.zone3_corner["outer_k"])
         far_k = float(self.zone3_corner["far_k"])
         centroid_u = float(self.zone3_corner.get("centroid_u", cu))
@@ -2030,7 +2545,7 @@ class FenceLocatorNode(Node):
         if float(np.dot(to_cloud, axis_far)) < 0.0:
             axis_far = -axis_far
 
-        p0 = np.asarray([cu, cv], dtype=np.float64)
+        p0 = anchor_local
         total_len = self.zone3_model_side_len + self.zone3_model_main_len
         main_depth = self.zone3_model_main_depth
         side_depth = self.zone3_model_side_depth
@@ -2043,8 +2558,8 @@ class FenceLocatorNode(Node):
             (0.0, side_depth),
             (0.0, 0.0),
         ]
-        axis_x = axis_far
-        axis_y = axis_outer
+        axis_x = selected_axis_x
+        axis_y = selected_axis_y
         outline_points = [
             p0 + axis_x * float(a) + axis_y * float(b)
             for a, b in outline_local
@@ -2075,6 +2590,7 @@ class FenceLocatorNode(Node):
         for item in outline_points:
             marker.points.append(local_point(item))
         self.pub_marker.publish(marker)
+        self.delete_marker(marker_id=46)
 
     def stop_marker_publish(self) -> None:
         if self.shutting_down:

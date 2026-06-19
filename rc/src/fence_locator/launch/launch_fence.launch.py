@@ -4,12 +4,13 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, RegisterEventHandler, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnShutdown
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     bag_path = LaunchConfiguration("bag_path")
+    bag_start_offset = LaunchConfiguration("bag_start_offset")
     bag_rate = LaunchConfiguration("bag_rate")
     read_ahead_queue_size = LaunchConfiguration("read_ahead_queue_size")
     field_side = LaunchConfiguration("field_side")
@@ -19,7 +20,11 @@ def generate_launch_description():
     entry_forward_source = LaunchConfiguration("entry_forward_source")
     node_start_delay = LaunchConfiguration("node_start_delay")
     bag_keyboard = LaunchConfiguration("bag_keyboard")
+    bag_in_xterm = LaunchConfiguration("bag_in_xterm")
+    hold_pointcloud = LaunchConfiguration("hold_pointcloud")
     publish_field_model = LaunchConfiguration("publish_field_model")
+    launch_rviz = LaunchConfiguration("launch_rviz")
+    launch_tuner = LaunchConfiguration("launch_tuner")
     enable_zone3_ransac_refine = LaunchConfiguration("enable_zone3_ransac_refine")
     zone3_ransac_radius = LaunchConfiguration("zone3_ransac_radius")
     zone3_ransac_dist_thr = LaunchConfiguration("zone3_ransac_dist_thr")
@@ -37,6 +42,11 @@ def generate_launch_description():
             "bag_rate",
             default_value="1.0",
             description="回放速率",
+        ),
+        DeclareLaunchArgument(
+            "bag_start_offset",
+            default_value="22.0",
+            description="Seconds to skip from bag start; default starts a few seconds before ramp detection.",
         ),
         DeclareLaunchArgument(
             "read_ahead_queue_size",
@@ -70,13 +80,23 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "node_start_delay",
-            default_value="2.0",
+            default_value="0.0",
             description="bag 开始后再启动分析节点的延迟秒数，避免状态机在无 bag 数据时采集基准",
         ),
         DeclareLaunchArgument(
             "bag_keyboard",
+            default_value="false",
+            description="是否保留 rosbag 自带键盘控制；默认 false，改由 Qt 调用暂停服务",
+        ),
+        DeclareLaunchArgument(
+            "bag_in_xterm",
+            default_value="false",
+            description="true 时在独立 xterm 中启动 rosbag；默认 false，避免 bag 数据没喂进状态机",
+        ),
+        DeclareLaunchArgument(
+            "hold_pointcloud",
             default_value="true",
-            description="是否保留 rosbag 键盘控制；true 时空格可暂停，false 时禁用键盘控制",
+            description="true 时发布 /odin1/cloud_slam_hold，暂停 bag 后 RViz 点云仍保持显示",
         ),
         DeclareLaunchArgument(
             "publish_field_model",
@@ -103,14 +123,30 @@ def generate_launch_description():
             default_value="35",
             description="第三区角点 RANSAC 单条边最少内点数",
         ),
+        DeclareLaunchArgument(
+            "launch_rviz",
+            default_value="true",
+            description="是否随 launch 一起启动 RViz2",
+        ),
+        DeclareLaunchArgument(
+            "launch_tuner",
+            default_value="true",
+            description="是否随 launch 一起启动 Zone3 TF 手动校准 Qt 窗口",
+        ),
     ]
 
     bag_play = ExecuteProcess(
         cmd=[
+            "xterm",
+            "-T",
+            "BAG 回放窗口：空格暂停/继续",
+            "-e",
             "ros2",
             "bag",
             "play",
             bag_path,
+            "--start-offset",
+            bag_start_offset,
             "-r",
             bag_rate,
             "--read-ahead-queue-size",
@@ -121,7 +157,28 @@ def generate_launch_description():
         output="log",
         sigterm_timeout="2.0",
         sigkill_timeout="2.0",
-        condition=IfCondition(bag_keyboard),
+        condition=IfCondition(bag_in_xterm),
+    )
+
+    bag_play_same_terminal = ExecuteProcess(
+        cmd=[
+            "ros2",
+            "bag",
+            "play",
+            bag_path,
+            "--start-offset",
+            bag_start_offset,
+            "-r",
+            bag_rate,
+            "--read-ahead-queue-size",
+            read_ahead_queue_size,
+            "--clock",
+            "100",
+        ],
+        output="log",
+        sigterm_timeout="2.0",
+        sigkill_timeout="2.0",
+        condition=IfCondition(PythonExpression(["'", bag_in_xterm, "' == 'false' and '", bag_keyboard, "' == 'true'"])),
     )
 
     bag_play_no_keyboard = ExecuteProcess(
@@ -130,6 +187,8 @@ def generate_launch_description():
             "bag",
             "play",
             bag_path,
+            "--start-offset",
+            bag_start_offset,
             "-r",
             bag_rate,
             "--read-ahead-queue-size",
@@ -141,7 +200,7 @@ def generate_launch_description():
         output="log",
         sigterm_timeout="2.0",
         sigkill_timeout="2.0",
-        condition=UnlessCondition(bag_keyboard),
+        condition=IfCondition(PythonExpression(["'", bag_in_xterm, "' == 'false' and '", bag_keyboard, "' == 'false'"])),
     )
 
     uphill = Node(
@@ -162,12 +221,14 @@ def generate_launch_description():
         parameters=[
             {
                 "use_sim_time": True,
-                "field_side": field_side,
+                "field_side": "blue",
+                "auto_field_side": False,
                 "publish_low_confidence": publish_low_confidence,
                 "publish_ramp_template": publish_ramp_template,
                 "publish_legacy_ramp_markers": False,
                 "publish_zone3_debug_markers": True,
                 "publish_zone3_root_tf": True,
+                "zone3_root_frame": "blue_zone3_root_auto",
                 "publish_zone3_field_marker": True,
                 "publish_fence_top_marker": publish_fence_top_marker,
                 "entry_forward_source": entry_forward_source,
@@ -181,8 +242,40 @@ def generate_launch_description():
                 "zone3_ransac_radius_m": zone3_ransac_radius,
                 "zone3_ransac_dist_thr_m": zone3_ransac_dist_thr,
                 "zone3_ransac_min_inliers": zone3_ransac_min_inliers,
+                # 2026-06-19: 当前固定蓝区后，按 Qt 手动校准值反推的新补偿。
+                # 目标约 (9.8665, 1.8655, -0.2648, 92.50deg)。
+                "zone3_root_calib_forward_m": -0.161,
+                "zone3_root_calib_lateral_m": 0.040,
+                "zone3_root_calib_z_m": 0.0,
+                "zone3_root_calib_yaw_deg": 0.40,
+                "enable_zone3_inside_refine": True,
+                "zone3_inside_refine_xy_range_m": 0.08,
+                "zone3_inside_refine_xy_step_m": 0.02,
+                "zone3_inside_refine_yaw_range_deg": 0.6,
+                "zone3_inside_refine_yaw_step_deg": 0.2,
+                "zone3_inside_refine_min_outside_ratio": 0.08,
+                "zone3_inside_refine_min_outside_points": 60,
             }
         ],
+        sigterm_timeout="2.0",
+        sigkill_timeout="2.0",
+    )
+
+    cloud_hold = Node(
+        package="fence_locator",
+        executable="pointcloud_hold",
+        name="pointcloud_hold",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": False,
+                "input_topic": "/odin1/cloud_slam",
+                "output_topic": "/odin1/cloud_slam_hold",
+                "publish_hz": 5.0,
+                "restamp": False,
+            }
+        ],
+        condition=IfCondition(hold_pointcloud),
         sigterm_timeout="2.0",
         sigkill_timeout="2.0",
     )
@@ -198,9 +291,33 @@ def generate_launch_description():
         condition=IfCondition(publish_field_model),
     )
 
+    rviz = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        output="screen",
+        parameters=[{"use_sim_time": True}],
+        condition=IfCondition(launch_rviz),
+    )
+
+    tuner = Node(
+        package="fence_locator",
+        executable="zone3_tf_tuner",
+        name="zone3_tf_tuner",
+        output="log",
+        parameters=[
+            {
+                "parent_frame": "odom",
+                "source_frame": "blue_zone3_root_auto",
+                "output_frame": "blue_zone3_root",
+            }
+        ],
+        condition=IfCondition(launch_tuner),
+    )
+
     analysis_nodes = TimerAction(
         period=node_start_delay,
-        actions=[uphill, fence, field_model],
+        actions=[uphill, fence, cloud_hold, field_model, rviz, tuner],
     )
 
     shutdown_log = RegisterEventHandler(
@@ -213,4 +330,6 @@ def generate_launch_description():
         )
     )
 
-    return LaunchDescription(args + [bag_play, bag_play_no_keyboard, analysis_nodes, shutdown_log])
+    return LaunchDescription(
+        args + [bag_play, bag_play_same_terminal, bag_play_no_keyboard, analysis_nodes, shutdown_log]
+    )

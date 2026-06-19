@@ -9,6 +9,7 @@ import math
 import rclpy
 from geometry_msgs.msg import Point, TransformStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from tf2_ros import StaticTransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -244,7 +245,9 @@ class Zone12CarpetPublisher(Node):
             )
 
         self._tf_static = StaticTransformBroadcaster(self)
-        self._marker_pub = self.create_publisher(MarkerArray, MARKER_TOPIC, 10)
+        marker_qos = QoSProfile(depth=1)
+        marker_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self._marker_pub = self.create_publisher(MarkerArray, MARKER_TOPIC, marker_qos)
 
         all_tfs = []
         all_tfs.extend(self._build_shared_transforms())
