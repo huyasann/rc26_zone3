@@ -11,8 +11,9 @@ except Exception as exc:  # pragma: no cover
 
 import rclpy
 from geometry_msgs.msg import Point, TransformStamped
-from rosbag2_interfaces.srv import TogglePaused
+from rosbag2_interfaces.srv import Resume, Seek, TogglePaused
 from rclpy.node import Node
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
 from visualization_msgs.msg import Marker
 
@@ -37,17 +38,23 @@ class Zone3TfTunerNode(Node):
         self.marker_topic = str(self.declare_parameter("marker_topic", "/zone3_tf_tuner/axes").value)
         self.axis_length = float(self.declare_parameter("axis_length_m", 0.45).value)
         self.publish_rate_hz = float(self.declare_parameter("publish_rate_hz", 20.0).value)
+        self.restart_seek_sec = float(self.declare_parameter("restart_seek_sec", 0.0).value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.marker_pub = self.create_publisher(Marker, self.marker_topic, 10)
         self.pause_client = self.create_client(TogglePaused, "/rosbag2_player/toggle_paused")
+        self.seek_client = self.create_client(Seek, "/rosbag2_player/seek")
+        self.resume_client = self.create_client(Resume, "/rosbag2_player/resume")
+        self.fence_reset_client = self.create_client(Trigger, "/fence_locator/reset")
+        self.uphill_reset_client = self.create_client(Trigger, "/uphill_state_node/reset")
 
         self.manual_pose = [0.0, 0.0, 0.0, 0.0]
         self.publish_enabled = True
         self.follow_source = True
         self.pause_request_in_flight = None
+        self.restart_futures = []
 
     def lookup_source(self) -> tuple[float, float, float, float] | None:
         try:
@@ -129,6 +136,47 @@ class Zone3TfTunerNode(Node):
         self.pause_request_in_flight = self.pause_client.call_async(TogglePaused.Request())
         return True
 
+    def restart_detection(self) -> list[str]:
+        missing = []
+        if self.fence_reset_client.service_is_ready():
+            self.restart_futures.append(self.fence_reset_client.call_async(Trigger.Request()))
+        else:
+            missing.append("/fence_locator/reset")
+        if self.uphill_reset_client.service_is_ready():
+            self.restart_futures.append(self.uphill_reset_client.call_async(Trigger.Request()))
+        else:
+            missing.append("/uphill_state_node/reset")
+        if self.seek_client.service_is_ready():
+            req = Seek.Request()
+            sec = max(0.0, float(self.restart_seek_sec))
+            req.time.sec = int(sec)
+            req.time.nanosec = int((sec - int(sec)) * 1e9)
+            self.restart_futures.append(self.seek_client.call_async(req))
+        else:
+            missing.append("/rosbag2_player/seek")
+        if self.resume_client.service_is_ready():
+            self.restart_futures.append(self.resume_client.call_async(Resume.Request()))
+        else:
+            missing.append("/rosbag2_player/resume")
+        return missing
+
+    def collect_finished_restart_results(self) -> list[str]:
+        messages = []
+        pending = []
+        for future in self.restart_futures:
+            if not future.done():
+                pending.append(future)
+                continue
+            try:
+                result = future.result()
+            except Exception as exc:
+                messages.append(f"失败: {exc}")
+                continue
+            if hasattr(result, "success") and not bool(result.success):
+                messages.append("服务返回失败")
+        self.restart_futures = pending
+        return messages
+
 
 class Zone3TfTunerWindow(QtWidgets.QWidget):
     def __init__(self, node: Zone3TfTunerNode) -> None:
@@ -137,6 +185,7 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
         self.setWindowTitle("Zone3 TF 手动校准")
         self.setMinimumWidth(420)
         self._updating = False
+        self.restart_status_ticks = 0
 
         layout = QtWidgets.QVBoxLayout(self)
         self.status_label = QtWidgets.QLabel("等待 TF...")
@@ -176,6 +225,8 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
         buttons.addWidget(self.read_button)
         buttons.addWidget(self.zero_yaw_button)
         buttons.addWidget(self.pause_button)
+        self.restart_button = QtWidgets.QPushButton("一键重开检测")
+        buttons.addWidget(self.restart_button)
         layout.addLayout(buttons)
 
         hint = QtWidgets.QLabel(
@@ -195,6 +246,7 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
         self.read_button.clicked.connect(self.read_source_once)
         self.zero_yaw_button.clicked.connect(lambda: self.spin_yaw.setValue(0.0))
         self.pause_button.clicked.connect(self.toggle_bag_pause)
+        self.restart_button.clicked.connect(self.restart_detection)
         self.pause_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self)
         self.pause_shortcut.activated.connect(self.toggle_bag_pause)
 
@@ -242,6 +294,14 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
         else:
             self.status_label.setText("未找到 /rosbag2_player/toggle_paused 服务")
 
+    def restart_detection(self) -> None:
+        missing = self.node.restart_detection()
+        self.restart_status_ticks = max(20, int(self.node.publish_rate_hz * 2.0))
+        if missing:
+            self.status_label.setText("重开请求已发，缺少服务: " + ", ".join(missing))
+        else:
+            self.status_label.setText("重开请求已发：reset uphill/fence + seek/resume bag")
+
     def read_source_once(self) -> None:
         self._on_frames_changed()
         pose = self.node.lookup_source()
@@ -262,13 +322,21 @@ class Zone3TfTunerWindow(QtWidgets.QWidget):
 
     def tick(self) -> None:
         rclpy.spin_once(self.node, timeout_sec=0.0)
+        restart_errors = self.node.collect_finished_restart_results()
+        if restart_errors:
+            self.restart_status_ticks = max(20, int(self.node.publish_rate_hz * 2.0))
+            self.status_label.setText("重开部分失败: " + "; ".join(restart_errors))
         if self.follow_box.isChecked():
             pose = self.node.lookup_source()
             if pose is not None:
                 self._set_spins_from_pose(pose)
-                self.status_label.setText(f"读取 {self.node.source_frame}，发布 {self.node.output_frame}")
+                if self.restart_status_ticks <= 0:
+                    self.status_label.setText(f"读取 {self.node.source_frame}，发布 {self.node.output_frame}")
             else:
-                self.status_label.setText(f"未找到 TF: {self.node.parent_frame} -> {self.node.source_frame}")
+                if self.restart_status_ticks <= 0:
+                    self.status_label.setText(f"未找到 TF: {self.node.parent_frame} -> {self.node.source_frame}")
+        if self.restart_status_ticks > 0:
+            self.restart_status_ticks -= 1
         self.node.publish_manual_tf()
 
 

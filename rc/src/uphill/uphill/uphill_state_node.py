@@ -21,6 +21,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker
 
@@ -155,6 +156,7 @@ class UphillStateNode(Node):
         self.create_subscription(Odometry, self.odom_topic, self.on_odom, 50)
         if self.enable_endpoint_ground_detection:
             self.create_subscription(PointCloud2, self.cloud_topic, self.on_cloud, 10)
+        self.create_service(Trigger, "~/reset", self.on_reset_request)
         self.keyboard_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
         self.keyboard_thread.start()
 
@@ -163,6 +165,12 @@ class UphillStateNode(Node):
             self.get_logger().info(f"ground detect cloud: {self.cloud_topic} -> {self.height_frame}")
         self.get_logger().info(f"publish: {self.state_topic}, {self.debug_topic}")
         self.get_logger().info("press R to reset state machine and re-collect baseline")
+
+    def on_reset_request(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        self._reset_state_machine()
+        response.success = True
+        response.message = "uphill reset"
+        return response
 
     def on_odom(self, msg: Odometry) -> None:
         stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9

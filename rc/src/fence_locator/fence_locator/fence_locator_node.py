@@ -22,6 +22,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Float32, String
+from std_srvs.srv import Trigger
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from visualization_msgs.msg import Marker
 
@@ -293,6 +294,7 @@ class FenceLocatorNode(Node):
         self.create_subscription(PoseStamped, "/uphill/transition_pose", self.on_transition_pose, 10)
         self.create_subscription(Odometry, "/odin1/odometry_highfreq", self.on_odom, 50)
         self.create_subscription(PointCloud2, "/odin1/cloud_slam", self.on_cloud, 10)
+        self.create_service(Trigger, "~/reset", self.on_reset_request)
 
         self.pub_offset = self.create_publisher(Float32, "/ramp/lateral_offset", 10)
         self.pub_conf = self.create_publisher(Float32, "/ramp/confidence", 10)
@@ -313,6 +315,50 @@ class FenceLocatorNode(Node):
             f"use_odom_pca_yaw={self.use_odom_pca_yaw}, "
             f"update_ramp_yaw_from_odom={self.update_ramp_yaw_from_odom}"
         )
+
+    def on_reset_request(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        self.enabled = False
+        self.lateral_detection_enabled = False
+        self.finalized = False
+        self.collection_reset_done = False
+        self.zone3_collect_after_platform = False
+        self.zone3_platform_cloud_frames = 0
+        self.zone3_platform_skipped_frames = 0
+        self.state = "flat"
+        self.last_state_pub = None
+        self.collection_log_once = False
+        self.lateral_ests.clear()
+        self.trusted_count = 0
+        self.two_side_count = 0
+        self.positive_side_count = 0
+        self.negative_side_count = 0
+        self.lateral_locked = None
+        self.confidence = 0.0
+        self.locked_pose = None
+        self.ramp_start_pose = None
+        self.ramp_end_pose = None
+        self.pending_transition_pose = None
+        self.collect_ramp_odom = False
+        self.ramp_odom_points.clear()
+        self.odom_history.clear()
+        self._reset_zone3_cloud_cache("manual_reset")
+        self._publish_delete_all_markers()
+        response.success = True
+        response.message = "fence_locator reset"
+        self.get_logger().info("manual reset: fence_locator cache/state cleared")
+        return response
+
+    def _publish_delete_all_markers(self) -> None:
+        marker = Marker()
+        marker.header.frame_id = "odom"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "ramp_model"
+        marker.id = 0
+        marker.action = Marker.DELETEALL
+        try:
+            self.pub_marker.publish(marker)
+        except Exception:
+            pass
 
     def clear_startup_markers(self) -> None:
         if self.marker_clear_once:
