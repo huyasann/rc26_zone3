@@ -34,7 +34,8 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             "bag_path",
-            default_value="/mnt/c/Users/22240/rc2026_snapshot/bag/cha1nav2_20260612_154209/",
+            default_value="/mnt/c/Users/22240/rc2026_snapshot/bag/cha1nav2_20260621_195235",
+            #cha1nav2_20260621_195235
             #cha1nav2_20260523_133237
             #cha1nav2_20260612_154209/
             #cha1nav2_20260523_201149/
@@ -152,6 +153,7 @@ def generate_launch_description():
             "bag",
             "play",
             bag_path,
+            "--loop",
             "--start-offset",
             bag_start_offset,
             "-r",
@@ -178,6 +180,7 @@ def generate_launch_description():
             "bag",
             "play",
             bag_path,
+            "--loop",
             "--start-offset",
             bag_start_offset,
             "-r",
@@ -204,6 +207,7 @@ def generate_launch_description():
             "bag",
             "play",
             bag_path,
+            "--loop",
             "--start-offset",
             bag_start_offset,
             "-r",
@@ -344,6 +348,7 @@ def generate_launch_description():
                 "parent_frame": "odom",
                 "source_frame": "blue_zone3_root_auto",
                 "output_frame": "blue_zone3_root",
+                "restart_seek_sec": bag_start_offset,
             }
         ],
         condition=IfCondition(launch_tuner),
