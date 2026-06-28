@@ -28,6 +28,7 @@ from visualization_msgs.msg import Marker
 
 from .geometry import local_to_odom
 from .pointcloud import parse_cloud
+from .zone3_slope_detector import SlopeDetectorConfig, SlopeSample, SlopeTrajectoryDetector
 from .zone3_corner_detector import Zone3CornerConfig, fit_zone3_corner_from_samples
 
 class FenceLocatorNode(Node):
@@ -103,6 +104,11 @@ class FenceLocatorNode(Node):
             self.declare_parameter("apply_lateral_detection_to_model", False).value
         )
         self.auto_field_side = bool(self.declare_parameter("auto_field_side", True).value)
+        self.auto_field_side_fallback = str(
+            self.declare_parameter("auto_field_side_fallback", "blue").value
+        ).lower()
+        if self.auto_field_side_fallback not in ("blue", "red"):
+            self.auto_field_side_fallback = "blue"
         self.publish_fence_top_marker = bool(
             self.declare_parameter("publish_fence_top_marker", False).value
         )
@@ -202,6 +208,9 @@ class FenceLocatorNode(Node):
         self.enable_zone3_inside_refine = bool(
             self.declare_parameter("enable_zone3_inside_refine", True).value
         )
+        self.zone3_keep_detected_corner_anchor = bool(
+            self.declare_parameter("zone3_keep_detected_corner_anchor", True).value
+        )
         self.zone3_inside_refine_xy_range = float(
             self.declare_parameter("zone3_inside_refine_xy_range_m", 0.08).value
         )
@@ -220,9 +229,70 @@ class FenceLocatorNode(Node):
         self.zone3_inside_refine_min_outside_points = int(
             self.declare_parameter("zone3_inside_refine_min_outside_points", 60).value
         )
+        self.enable_zone3_grid_assist = bool(
+            self.declare_parameter("enable_zone3_grid_assist", True).value
+        )
+        self.zone3_grid_assist_weight = float(
+            self.declare_parameter("zone3_grid_assist_weight", 900.0).value
+        )
+        self.zone3_grid_center_x = float(
+            self.declare_parameter("zone3_grid_center_x_m", -3.025).value
+        )
+        self.zone3_grid_center_y = float(
+            self.declare_parameter("zone3_grid_center_y_m", -0.150).value
+        )
+        self.zone3_grid_roi_x = float(
+            self.declare_parameter("zone3_grid_roi_x_m", 1.20).value
+        )
+        self.zone3_grid_roi_y = float(
+            self.declare_parameter("zone3_grid_roi_y_m", 1.35).value
+        )
+        self.zone3_grid_min_h = float(
+            self.declare_parameter("zone3_grid_min_h_m", 0.72).value
+        )
+        self.zone3_grid_max_h = float(
+            self.declare_parameter("zone3_grid_max_h_m", 2.60).value
+        )
+        self.zone3_grid_min_points = int(
+            self.declare_parameter("zone3_grid_min_points", 35).value
+        )
         self.entry_forward_source = str(
             self.declare_parameter("entry_forward_source", "odom_start").value
         ).lower()
+        self.enable_slope_trajectory_fit = bool(
+            self.declare_parameter("enable_slope_trajectory_fit", True).value
+        )
+        self.publish_slope_trajectory_marker = bool(
+            self.declare_parameter("publish_slope_trajectory_marker", True).value
+        )
+        self.slope_fit_use_as_ramp_pose = bool(
+            self.declare_parameter("slope_fit_use_as_ramp_pose", False).value
+        )
+        self.slope_fit_start_collection = bool(
+            self.declare_parameter("slope_fit_start_collection", True).value
+        )
+        self.publish_slope_root_tf = bool(
+            self.declare_parameter("publish_slope_root_tf", True).value
+        )
+        self.slope_root_frame = str(
+            self.declare_parameter("slope_root_frame", "blue_zone3_root_slope").value
+        ).strip()
+        slope_cfg = SlopeDetectorConfig(
+            ramp_x=float(self.declare_parameter("slope_fit_ramp_x_m", 2.275).value),
+            ramp_low_y=float(self.declare_parameter("slope_fit_ramp_low_y_m", 1.30).value),
+            ramp_top_y=float(self.declare_parameter("slope_fit_ramp_top_y_m", -0.20).value),
+            min_z_gain=float(self.declare_parameter("slope_fit_min_z_gain_m", 0.34).value),
+            max_z_gain=float(self.declare_parameter("slope_fit_max_z_gain_m", 0.70).value),
+            min_xy_dist=float(self.declare_parameter("slope_fit_min_xy_dist_m", 0.70).value),
+            min_pitch_abs_deg=float(self.declare_parameter("slope_fit_min_pitch_abs_deg", 12.0).value),
+            event_min_z_gain=float(self.declare_parameter("slope_event_min_z_gain_m", 0.035).value),
+            event_min_pitch_abs_deg=float(self.declare_parameter("slope_event_min_pitch_abs_deg", 6.0).value),
+            event_backtrack_sec=float(self.declare_parameter("slope_event_backtrack_sec", 1.0).value),
+            window_sec=float(self.declare_parameter("slope_fit_window_sec", 35.0).value),
+            min_fit_points=int(self.declare_parameter("slope_fit_min_points", 8).value),
+            strong_residual=float(self.declare_parameter("slope_fit_strong_residual_m", 0.18).value),
+            weak_residual=float(self.declare_parameter("slope_fit_weak_residual_m", 0.42).value),
+        )
 
         self.state = "flat"
         self.last_state_pub: str | None = None
@@ -265,6 +335,7 @@ class FenceLocatorNode(Node):
         self.bottom_corner_reason = "not_run"
         self.zone3_corner: dict | None = None
         self.zone3_corner_reason = "not_run"
+        self.zone3_fit_locked = False
         self.zone3_yaw_refine_delta = 0.0
         self.zone3_yaw_refine_score = 0.0
         self.zone3_inside_score = 0.0
@@ -274,6 +345,16 @@ class FenceLocatorNode(Node):
         self.zone3_inside_refine_dx = 0.0
         self.zone3_inside_refine_dy = 0.0
         self.zone3_inside_refine_dyaw = 0.0
+        self.zone3_grid_score = 0.0
+        self.zone3_grid_points = 0
+        self.zone3_grid_center_err = float("nan")
+        self.zone3_grid_yaw_err = float("nan")
+        self.zone3_grid_width = float("nan")
+        self.zone3_grid_depth = float("nan")
+        self.slope_detector = SlopeTrajectoryDetector(slope_cfg)
+        self.slope_fit = None
+        self.slope_fit_log_once = False
+        self.slope_root_tf_log_once = False
 
         self.stop_keyboard = False
         self.shutdown_requested = False
@@ -286,6 +367,7 @@ class FenceLocatorNode(Node):
         self.collection_reset_done = False
         self.zone3_root_tf_log_once = False
         self.zone3_collect_after_platform = False
+        self.slope_fallback_collecting = False
         self.zone3_platform_cloud_frames = 0
         self.zone3_platform_skipped_frames = 0
 
@@ -339,8 +421,13 @@ class FenceLocatorNode(Node):
         self.ramp_end_pose = None
         self.pending_transition_pose = None
         self.collect_ramp_odom = False
+        self.slope_fallback_collecting = False
         self.ramp_odom_points.clear()
         self.odom_history.clear()
+        self.slope_detector.reset()
+        self.slope_fit = None
+        self.slope_fit_log_once = False
+        self.slope_root_tf_log_once = False
         self._reset_zone3_cloud_cache("manual_reset")
         self._publish_delete_all_markers()
         response.success = True
@@ -386,15 +473,41 @@ class FenceLocatorNode(Node):
         t = float(stamp.sec) + float(stamp.nanosec) * 1e-9
         pos = msg.pose.pose.position
         q = msg.pose.pose.orientation
-        yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
+        roll, pitch, yaw = self.quat_to_rpy(q.x, q.y, q.z, q.w)
         self.last_pose = (float(pos.x), float(pos.y), float(pos.z), yaw)
         sample = (t, float(pos.x), float(pos.y), float(pos.z), yaw)
         self.odom_history.append(sample)
         if self.collect_ramp_odom:
             self.ramp_odom_points.append(sample)
+        if self.enable_slope_trajectory_fit:
+            fit = self.slope_detector.add_sample(
+                SlopeSample(
+                    t=t,
+                    x=float(pos.x),
+                    y=float(pos.y),
+                    z=float(pos.z),
+                    yaw=yaw,
+                    pitch_abs=abs(pitch),
+                )
+            )
+            if fit is not None:
+                self.slope_fit = fit
+                if self.zone3_collect_after_platform and not self.finalized and self.state != "platform":
+                    self.slope_fallback_collecting = True
+                if self.slope_fit_use_as_ramp_pose and self.locked_pose is None:
+                    self.locked_pose = (fit.root_x, fit.root_y, fit.low.z, fit.root_yaw)
+                if self.slope_fit_start_collection and not self.collection_reset_done and not self.finalized:
+                    self._start_collection_from_slope_fit(fit)
+                if not self.slope_fit_log_once:
+                    self.slope_fit_log_once = True
+                    self.get_logger().info(
+                        "slope trajectory fit: "
+                        f"root=({fit.root_x:.3f},{fit.root_y:.3f}), "
+                        f"root_yaw={math.degrees(fit.root_yaw):.2f}deg, "
+                        f"ramp_yaw={math.degrees(fit.ramp_yaw):.2f}deg, "
+                        f"z_gain={fit.z_gain:.3f}, residual={fit.residual:.3f}, "
+                        f"score={fit.score:.3f}, source={fit.source}"
+                    )
 
     def on_transition_pose(self, msg: PoseStamped) -> None:
         stamp = msg.header.stamp
@@ -416,6 +529,8 @@ class FenceLocatorNode(Node):
         self.bottom_corner_reason = reason
         self.zone3_corner = None
         self.zone3_corner_reason = reason
+        if reason == "manual_reset":
+            self.zone3_fit_locked = False
         self.cloud_lateral_correction = 0.0
         self.zone3_root_tf_log_once = False
         self.zone3_yaw_refine_delta = 0.0
@@ -432,6 +547,7 @@ class FenceLocatorNode(Node):
         if self.finalized:
             return
         self.zone3_collect_after_platform = False
+        self.slope_fallback_collecting = False
         self.enabled = False
         self.lateral_detection_enabled = False
         self.finalized = True
@@ -443,6 +559,27 @@ class FenceLocatorNode(Node):
             f"cloud={self.cloud_seen}, analyzed={self.cloud_analyzed}"
         )
         self.fuse_and_publish()
+        if self._zone3_fit_quality_ok():
+            self.zone3_fit_locked = True
+            self.get_logger().info("zone3 fit locked: accepted first valid fit, later ramp candidates ignored")
+
+    def _zone3_fit_quality_ok(self) -> bool:
+        if self.zone3_corner is None:
+            return False
+        angle = float(self.zone3_corner.get("angle_deg", 0.0))
+        vertical_count = int(self.zone3_corner.get("vertical_count", 0))
+        vertical_span = float(self.zone3_corner.get("vertical_span", 0.0))
+        outer_rmse = float(self.zone3_corner.get("outer_rmse", 1.0))
+        far_rmse = float(self.zone3_corner.get("far_rmse", 1.0))
+        return (
+            82.0 <= angle <= 98.0
+            and vertical_count >= 20
+            and vertical_span >= 0.045
+            and outer_rmse <= 0.070
+            and far_rmse <= 0.070
+            and self.zone3_inside_points >= 500
+            and self.zone3_outside_ratio <= 0.18
+        )
 
     def on_state(self, msg: String) -> None:
         self._handle_uphill_state(msg.data.strip())
@@ -451,6 +588,8 @@ class FenceLocatorNode(Node):
         try:
             data = json.loads(msg.data)
         except Exception:
+            return
+        if self.zone3_fit_locked:
             return
         internal_state = str(data.get("internal_state", "")).strip()
         if internal_state != "flat_to_uphill" or self.collection_reset_done:
@@ -465,6 +604,8 @@ class FenceLocatorNode(Node):
             self._start_collection_from_transition("early candidate ramp")
 
     def _handle_uphill_state(self, new_state: str) -> None:
+        if self.zone3_fit_locked:
+            return
         if new_state == self.last_state_pub:
             return
         self.last_state_pub = new_state
@@ -474,6 +615,7 @@ class FenceLocatorNode(Node):
             if self.zone3_collect_after_platform and not self.finalized:
                 self._reset_zone3_cloud_cache("candidate_back_flat")
                 self.zone3_collect_after_platform = False
+                self.slope_fallback_collecting = False
                 self.zone3_platform_cloud_frames = 0
                 self.zone3_platform_skipped_frames = 0
                 self.collection_reset_done = False
@@ -511,6 +653,7 @@ class FenceLocatorNode(Node):
             self.collect_ramp_odom = True
             self._reset_zone3_cloud_cache("reset")
             self.zone3_collect_after_platform = True
+            self.slope_fallback_collecting = False
             self.zone3_platform_cloud_frames = 0
             self.zone3_platform_skipped_frames = 0
             self.collection_reset_done = True
@@ -570,6 +713,8 @@ class FenceLocatorNode(Node):
                 self._finish_platform_cloud_collection()
 
     def _start_collection_from_transition(self, reason: str) -> None:
+        if self.zone3_fit_locked:
+            return
         if self.ground_z is not None:
             self.flat_ground_z = self.ground_z
             self.marker_ground_z_locked = self.flat_ground_z
@@ -608,6 +753,7 @@ class FenceLocatorNode(Node):
         self.zone3_root_tf_log_once = False
         self.collection_reset_done = True
         self.zone3_collect_after_platform = True
+        self.slope_fallback_collecting = False
         self.zone3_platform_cloud_frames = 0
         self.zone3_platform_skipped_frames = 0
         self.lateral_ests.clear()
@@ -627,6 +773,61 @@ class FenceLocatorNode(Node):
         self.get_logger().info(
             f"prepared ramp pose from {reason}, start ramp-to-platform cloud cache, "
             f"target_frames={self.zone3_post_platform_cloud_frames}"
+        )
+
+    def _start_collection_from_slope_fit(self, fit) -> None:
+        if self.zone3_fit_locked:
+            return
+        if self.ground_z is not None:
+            self.flat_ground_z = self.ground_z
+            self.marker_ground_z_locked = self.flat_ground_z
+        else:
+            self.get_logger().warn("slope trajectory fallback: ground_z not yet available")
+
+        self.ramp_start_pose = (fit.low.x, fit.low.y, fit.low.z, fit.ramp_yaw)
+        self.ramp_end_pose = (fit.top.x, fit.top.y, fit.top.z, fit.ramp_yaw)
+        self.locked_pose = (fit.root_x, fit.root_y, fit.low.z, fit.root_yaw)
+        self.lateral_locked = None
+        self.confidence = 0.0
+        self.ramp_start_time = fit.low.t
+        self.ramp_odom_points = [
+            (s.t, s.x, s.y, s.z, s.yaw)
+            for s in getattr(fit, "samples", [])
+        ]
+        self.collect_ramp_odom = True
+        self.cloud_samples.clear()
+        self.cloud_sample_points = 0
+        self.cloud_ransac_line = None
+        self.cloud_ransac_reason = "reset"
+        self.bottom_corner = None
+        self.bottom_corner_reason = "reset"
+        self.zone3_corner = None
+        self.zone3_corner_reason = "reset"
+        self.cloud_lateral_correction = 0.0
+        self.zone3_root_tf_log_once = False
+        self.collection_reset_done = True
+        self.slope_fallback_collecting = True
+        self.zone3_collect_after_platform = True
+        self.zone3_platform_cloud_frames = 0
+        self.zone3_platform_skipped_frames = 0
+        self.lateral_ests.clear()
+        self.trusted_count = 0
+        self.two_side_count = 0
+        self.positive_side_count = 0
+        self.negative_side_count = 0
+        self.inferred_field_side = self.field_side if self.field_side in ("blue", "red") else "unknown"
+        self.cloud_seen = 0
+        self.cloud_analyzed = 0
+        self.last_corridor_points = 0
+        self.last_candidate_peaks = 0
+        self.enabled = True
+        self.lateral_detection_enabled = False
+        self.finalized = False
+        self.collection_log_once = True
+        self.get_logger().info(
+            "slope trajectory fallback, start zone3 cloud cache: "
+            f"root=({fit.root_x:.3f},{fit.root_y:.3f}), "
+            f"yaw={math.degrees(fit.root_yaw):.2f}deg"
         )
 
     def _take_transition_start_pose(self) -> tuple[float, float, float, float] | None:
@@ -659,7 +860,10 @@ class FenceLocatorNode(Node):
                 return
             self._cache_cloud_points(xv, yv, zv)
             self.zone3_platform_cloud_frames += 1
-            if self.state == "platform" and self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames):
+            if (
+                self.zone3_platform_cloud_frames >= max(1, self.zone3_post_platform_cloud_frames)
+                and (self.state == "platform" or self.slope_fallback_collecting)
+            ):
                 self._finish_platform_cloud_collection()
             return
         if not self.lateral_detection_enabled:
@@ -935,6 +1139,10 @@ class FenceLocatorNode(Node):
                 f"inside_refine=({self.zone3_inside_refine_dx:+.3f},"
                 f"{self.zone3_inside_refine_dy:+.3f},"
                 f"{math.degrees(self.zone3_inside_refine_dyaw):+.2f}deg), "
+                f"grid_score={self.zone3_grid_score:.1f}, "
+                f"grid_n={self.zone3_grid_points}, "
+                f"grid_err={self.zone3_grid_center_err:.3f}m, "
+                f"grid_yaw_err={math.degrees(self.zone3_grid_yaw_err) if np.isfinite(self.zone3_grid_yaw_err) else float('nan'):.2f}deg, "
                 f"outer_inliers={corner.get('outer_bins', 0)}, far_inliers={corner.get('far_bins', 0)}, "
                 f"side={corner['side']}"
             )
@@ -1588,9 +1796,10 @@ class FenceLocatorNode(Node):
 
     def _fit_zone3_corner_from_cloud(self) -> None:
         forced_corner_side = None
-        if self.field_side == "blue":
+        active_side = self._active_side()
+        if active_side == "blue":
             forced_corner_side = "positive"
-        elif self.field_side == "red":
+        elif active_side == "red":
             forced_corner_side = "negative"
         config = Zone3CornerConfig(
             enable_ransac_refine=self.enable_zone3_ransac_refine,
@@ -1614,7 +1823,7 @@ class FenceLocatorNode(Node):
             return self.field_side
         if self.inferred_field_side in ("blue", "red"):
             return self.inferred_field_side
-        return "blue"
+        return self.auto_field_side_fallback
 
     @staticmethod
     def _angle_mean(a: float, b: float) -> float:
@@ -1817,6 +2026,153 @@ class FenceLocatorNode(Node):
         side = (local_x >= side_x0) & (local_x <= side_x1) & (local_y >= side_y0) & (local_y <= side_y1)
         return main | side
 
+    @staticmethod
+    def _angle_abs_half_turn(angle: float) -> float:
+        wrapped = math.atan2(math.sin(angle), math.cos(angle))
+        return min(abs(wrapped), abs(math.pi - abs(wrapped)))
+
+    @staticmethod
+    def _grid_connected_components(x: np.ndarray, y: np.ndarray, cell: float = 0.08) -> list[np.ndarray]:
+        if len(x) == 0:
+            return []
+        ix = np.floor(x / cell).astype(np.int32)
+        iy = np.floor(y / cell).astype(np.int32)
+        keys = np.column_stack((ix, iy))
+        unique, inv, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+        active = counts >= 2
+        if not active.any():
+            return []
+        cell_points: dict[int, list[int]] = {}
+        for point_i, cell_i in enumerate(inv):
+            if active[cell_i]:
+                cell_points.setdefault(int(cell_i), []).append(point_i)
+        coord_to_cell = {tuple(coord): int(i) for i, coord in enumerate(unique) if active[i]}
+        visited: set[int] = set()
+        comps: list[np.ndarray] = []
+        for start in list(cell_points):
+            if start in visited:
+                continue
+            stack = [start]
+            visited.add(start)
+            points: list[int] = []
+            while stack:
+                current = stack.pop()
+                points.extend(cell_points[current])
+                cx, cy = unique[current]
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nb = coord_to_cell.get((int(cx + dx), int(cy + dy)))
+                        if nb is not None and nb not in visited:
+                            visited.add(nb)
+                            stack.append(nb)
+            comps.append(np.asarray(points, dtype=np.int32))
+        comps.sort(key=len, reverse=True)
+        return comps
+
+    def _zone3_grid_assist_score(
+        self,
+        root_x: float,
+        root_y: float,
+        root_z: float,
+        root_yaw: float,
+    ) -> dict:
+        empty = {
+            "score": 0.0,
+            "points": 0,
+            "center_err": float("nan"),
+            "yaw_err": float("nan"),
+            "width": float("nan"),
+            "depth": float("nan"),
+        }
+        if (not self.enable_zone3_grid_assist) or not self.cloud_samples:
+            return empty
+        pts = np.concatenate(self.cloud_samples, axis=0)
+        if len(pts) < 300:
+            return empty
+        keep = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]) & np.isfinite(pts[:, 2])
+        if int(keep.sum()) < 300:
+            return empty
+        pts = pts[keep]
+        if len(pts) > 14000:
+            pts = pts[:: max(1, len(pts) // 14000)]
+
+        dx = pts[:, 0] - root_x
+        dy = pts[:, 1] - root_y
+        lx = dx * math.cos(root_yaw) + dy * math.sin(root_yaw)
+        ly = -dx * math.sin(root_yaw) + dy * math.cos(root_yaw)
+        h = pts[:, 2] - root_z
+
+        gx = self.zone3_grid_center_x if self._active_side() == "blue" else -self.zone3_grid_center_x
+        gy = self.zone3_grid_center_y
+        roi = (
+            (np.abs(lx - gx) <= self.zone3_grid_roi_x)
+            & (np.abs(ly - gy) <= self.zone3_grid_roi_y)
+            & (h >= self.zone3_grid_min_h)
+            & (h <= self.zone3_grid_max_h)
+            & np.isfinite(h)
+        )
+        if int(roi.sum()) < self.zone3_grid_min_points:
+            return empty
+
+        rx = lx[roi]
+        ry = ly[roi]
+        comps = self._grid_connected_components(rx, ry, cell=0.08)
+        best: dict | None = None
+        for comp in comps[:6]:
+            if len(comp) < self.zone3_grid_min_points:
+                continue
+            cx = rx[comp]
+            cy = ry[comp]
+            cloud = np.column_stack((cx, cy))
+            center0 = cloud.mean(axis=0)
+            demean = cloud - center0
+            if len(cloud) < 3:
+                continue
+            try:
+                _u, _s, vh = np.linalg.svd(demean, full_matrices=False)
+            except np.linalg.LinAlgError:
+                continue
+            long_axis = vh[0]
+            long_axis /= max(1e-9, float(np.linalg.norm(long_axis)))
+            yaw = math.atan2(float(long_axis[1]), float(long_axis[0])) - math.pi / 2.0
+            cyaw = math.cos(yaw)
+            syaw = math.sin(yaw)
+            local_x = cyaw * (cx - center0[0]) + syaw * (cy - center0[1])
+            local_y = -syaw * (cx - center0[0]) + cyaw * (cy - center0[1])
+            width = float(np.percentile(local_y, 97.0) - np.percentile(local_y, 3.0))
+            depth = float(np.percentile(local_x, 95.0) - np.percentile(local_x, 5.0))
+            if width < 0.65 or width > 2.40 or depth > 1.05:
+                continue
+            center_x = float(center0[0])
+            center_y = float(center0[1])
+            center_err = math.hypot(center_x - gx, center_y - gy)
+            yaw_err = self._angle_abs_half_turn(yaw)
+            width_score = math.exp(-abs(width - 1.62) / 0.45)
+            depth_score = math.exp(-max(0.0, depth - 0.55) / 0.45)
+            center_score = math.exp(-center_err / 0.50)
+            yaw_score = math.exp(-yaw_err / math.radians(12.0))
+            density_score = min(1.0, len(comp) / 420.0)
+            score = self.zone3_grid_assist_weight * (
+                0.34 * center_score
+                + 0.26 * yaw_score
+                + 0.20 * width_score
+                + 0.08 * depth_score
+                + 0.12 * density_score
+            )
+            item = {
+                "score": float(score),
+                "points": int(len(comp)),
+                "center_err": float(center_err),
+                "yaw_err": float(yaw_err),
+                "width": float(width),
+                "depth": float(depth),
+            }
+            if best is None or item["score"] > best["score"]:
+                best = item
+        return best if best is not None else empty
+
     def _zone3_field_fit_score(
         self,
         root_x: float,
@@ -1875,11 +2231,19 @@ class FenceLocatorNode(Node):
             - 14.0 * hard_outside_count
             - 250.0 * outside_ratio
         )
+        grid = self._zone3_grid_assist_score(root_x, root_y, cloud_z - self.zone3_model_key_z, root_yaw)
+        score += float(grid["score"])
         return {
             "score": float(score),
             "inside": inside_count,
             "outside": outside_count,
             "outside_ratio": float(outside_ratio),
+            "grid_score": float(grid["score"]),
+            "grid_points": int(grid["points"]),
+            "grid_center_err": float(grid["center_err"]),
+            "grid_yaw_err": float(grid["yaw_err"]),
+            "grid_width": float(grid["width"]),
+            "grid_depth": float(grid["depth"]),
         }
 
     def _refine_zone3_root_by_inside_constraint(
@@ -1900,6 +2264,12 @@ class FenceLocatorNode(Node):
         self.zone3_inside_points = int(current["inside"])
         self.zone3_outside_points = int(current["outside"])
         self.zone3_outside_ratio = float(current["outside_ratio"])
+        self.zone3_grid_score = float(current.get("grid_score", 0.0))
+        self.zone3_grid_points = int(current.get("grid_points", 0))
+        self.zone3_grid_center_err = float(current.get("grid_center_err", float("nan")))
+        self.zone3_grid_yaw_err = float(current.get("grid_yaw_err", float("nan")))
+        self.zone3_grid_width = float(current.get("grid_width", float("nan")))
+        self.zone3_grid_depth = float(current.get("grid_depth", float("nan")))
         if (
             (not self.enable_zone3_inside_refine)
             or best_score <= -1.0e17
@@ -1938,6 +2308,12 @@ class FenceLocatorNode(Node):
         self.zone3_inside_points = int(best_stats["inside"])
         self.zone3_outside_points = int(best_stats["outside"])
         self.zone3_outside_ratio = float(best_stats["outside_ratio"])
+        self.zone3_grid_score = float(best_stats.get("grid_score", 0.0))
+        self.zone3_grid_points = int(best_stats.get("grid_points", 0))
+        self.zone3_grid_center_err = float(best_stats.get("grid_center_err", float("nan")))
+        self.zone3_grid_yaw_err = float(best_stats.get("grid_yaw_err", float("nan")))
+        self.zone3_grid_width = float(best_stats.get("grid_width", float("nan")))
+        self.zone3_grid_depth = float(best_stats.get("grid_depth", float("nan")))
         self.zone3_inside_refine_dx = best_dx
         self.zone3_inside_refine_dy = best_dy
         self.zone3_inside_refine_dyaw = best_dyaw
@@ -2016,13 +2392,22 @@ class FenceLocatorNode(Node):
             )
             root_z += self.zone3_root_calib_z
             root_yaw = corrected_yaw
-        root_x, root_y, root_yaw = self._refine_zone3_root_by_inside_constraint(
+        refined_root_x, refined_root_y, refined_root_yaw = self._refine_zone3_root_by_inside_constraint(
             root_x,
             root_y,
             root_z,
             root_yaw,
             cloud_z,
         )
+        if self.zone3_keep_detected_corner_anchor:
+            # 红点是检测出的场地内角点。inside_refine 只能微调方向，不能再把模型整体平移走。
+            root_yaw = refined_root_yaw
+            root_x = cloud_x - (math.cos(root_yaw) * key_x - math.sin(root_yaw) * key_y)
+            root_y = cloud_y - (math.sin(root_yaw) * key_x + math.cos(root_yaw) * key_y)
+            self.zone3_inside_refine_dx = 0.0
+            self.zone3_inside_refine_dy = 0.0
+        else:
+            root_x, root_y, root_yaw = refined_root_x, refined_root_y, refined_root_yaw
         return root_x, root_y, root_z, root_yaw
 
     def publish_zone3_root_transform(self) -> None:
@@ -2058,6 +2443,8 @@ class FenceLocatorNode(Node):
     def publish(self) -> None:
         if self.shutting_down:
             return
+        self.publish_slope_root_transform()
+        self.publish_slope_trajectory_fit_marker()
         if self.zone3_corner is not None and self.locked_pose is not None:
             self.publish_zone3_root_transform()
             base_x, base_y, base_z, model_yaw = self.locked_pose
@@ -2095,6 +2482,47 @@ class FenceLocatorNode(Node):
         self.publish_zone3_root_transform()
         self.publish_markers(base_x, base_y, base_z, model_yaw)
 
+    def publish_slope_root_transform(self) -> None:
+        if (not self.publish_slope_root_tf) or self.slope_fit is None:
+            return
+        frame = self.slope_root_frame or "blue_zone3_root_slope"
+        fit = self.slope_fit
+        tf = TransformStamped()
+        tf.header.stamp = self.get_clock().now().to_msg()
+        tf.header.frame_id = "odom"
+        tf.child_frame_id = frame
+        tf.transform.translation.x = float(fit.root_x)
+        tf.transform.translation.y = float(fit.root_y)
+        tf.transform.translation.z = float(fit.low.z)
+        qx, qy, qz, qw = self.rpy_to_quat(0.0, 0.0, fit.root_yaw)
+        tf.transform.rotation.x = qx
+        tf.transform.rotation.y = qy
+        tf.transform.rotation.z = qz
+        tf.transform.rotation.w = qw
+        self.tf_br.sendTransform(tf)
+        if not self.slope_root_tf_log_once:
+            self.slope_root_tf_log_once = True
+            self.get_logger().info(
+                f"slope root tf: odom -> {frame}, "
+                f"xyz=({fit.root_x:.3f},{fit.root_y:.3f},{fit.low.z:.3f}), "
+                f"yaw={math.degrees(fit.root_yaw):.2f}deg"
+            )
+
+    @staticmethod
+    def quat_to_rpy(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        sinp = 2.0 * (w * y - z * x)
+        if abs(sinp) >= 1.0:
+            pitch = math.copysign(math.pi / 2.0, sinp)
+        else:
+            pitch = math.asin(sinp)
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        return roll, pitch, yaw
+
     @staticmethod
     def rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
         cr = math.cos(roll * 0.5)
@@ -2109,6 +2537,57 @@ class FenceLocatorNode(Node):
             cr * cp * sy - sr * sp * cy,
             cr * cp * cy + sr * sp * sy,
         )
+
+    def publish_slope_trajectory_fit_marker(self) -> None:
+        if not self.publish_slope_trajectory_marker or self.slope_fit is None:
+            return
+        fit = self.slope_fit
+        stamp = self.get_clock().now().to_msg()
+
+        line = Marker()
+        line.header.frame_id = "odom"
+        line.header.stamp = stamp
+        line.ns = "ramp_model"
+        line.id = 70
+        line.type = Marker.LINE_STRIP
+        line.action = Marker.ADD
+        line.scale.x = 0.045
+        line.color.r = 0.75
+        line.color.g = 0.15
+        line.color.b = 1.0
+        line.color.a = 0.95
+        line.pose.orientation.w = 1.0
+        for src in (fit.low, fit.top):
+            p = Point()
+            p.x = src.x
+            p.y = src.y
+            p.z = src.z
+            line.points.append(p)
+        self.pub_marker.publish(line)
+
+        for marker_id, src, rgba, scale in (
+            (71, fit.low, (0.95, 0.1, 0.1, 0.95), 0.06),
+            (72, fit.top, (0.1, 0.45, 1.0, 0.95), 0.06),
+        ):
+            sphere = Marker()
+            sphere.header.frame_id = "odom"
+            sphere.header.stamp = stamp
+            sphere.ns = "ramp_model"
+            sphere.id = marker_id
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+            sphere.scale.x = scale
+            sphere.scale.y = scale
+            sphere.scale.z = scale
+            sphere.color.r = rgba[0]
+            sphere.color.g = rgba[1]
+            sphere.color.b = rgba[2]
+            sphere.color.a = rgba[3]
+            sphere.pose.orientation.w = 1.0
+            sphere.pose.position.x = src.x
+            sphere.pose.position.y = src.y
+            sphere.pose.position.z = src.z
+            self.pub_marker.publish(sphere)
 
     def publish_markers(self, base_x: float, base_y: float, base_z: float, model_yaw: float) -> None:
         if not self.marker_clear_once:

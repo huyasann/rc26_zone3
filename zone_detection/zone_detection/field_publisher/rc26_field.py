@@ -445,7 +445,7 @@ class Zone12CarpetPublisher(Node):
                 ),
             )
 
-        if PUBLISH_Z3:
+        if PUBLISH_Z3 and self._display_mode == 2:
             self._append_tf(
                 tfs, ctx["z3_parent"], FIELD_Z3_SURFACE_FRAME,  # Z3 共享上表面
                 (
@@ -585,6 +585,26 @@ class Zone12CarpetPublisher(Node):
             self._append_tf(tfs, z3_frame, f"{prefix}zone3_ramp", (ramp_x, ramp_y, ramp_z))  # Z3 坡道中心
             z3_surface_frame = f"{prefix}zone3_surface"
             self._append_tf(tfs, z3_frame, z3_surface_frame, (0.0, 0.0, 0.4))  # Z3 上表面
+            grid_base_frame = f"{prefix}field_zone3_grid_base"
+            surface_dx = FIELD_Z3_SURFACE_CENTER[0] - z3x
+            surface_dy = FIELD_Z3_SURFACE_CENTER[1] - z3y
+            surface_dz = FIELD_Z3_SURFACE_CENTER[2] - z3z
+            bx = surface_dx + GRID_BASE_REL[0]
+            by = surface_dy + GRID_BASE_REL[1]
+            bz = surface_dz - 0.4 + GRID_BASE_REL[2]
+            self._append_tf(tfs, z3_surface_frame, grid_base_frame, (bx, by, bz))  # 九宫格基座
+            for li, lz in enumerate(GRID_LAYER_ZS_REL):
+                for ci, cy in enumerate(GRID_COL_YS_REL):
+                    col_name = GRID_COL_NAMES[ci]
+                    layer_name = GRID_LAYER_NAMES[li]
+                    name = f"{prefix}field_zone3_grid_{col_name}{layer_name}"
+                    self._append_tf(tfs, grid_base_frame, name, (0.0, cy, lz))
+            px = surface_dx + Z3_PARTITION_REL[0]
+            py = surface_dy + Z3_PARTITION_REL[1]
+            pz = surface_dz - 0.4 + Z3_PARTITION_REL[2]
+            self._append_tf(
+                tfs, z3_surface_frame, f"{prefix}field_zone3_center_partition", (px, py, pz)
+            )
             mrx, mry, mrz = Z3_MAIN_REL[team]
             self._append_tf(tfs, z3_surface_frame, f"{prefix}zone3_platform_main", (mrx, mry, mrz))  # Z3 主平台
             srx, sry, srz = Z3_SIDE_REL[team]
@@ -782,7 +802,7 @@ class Zone12CarpetPublisher(Node):
                 mid,
             )
 
-        if PUBLISH_Z3:
+        if PUBLISH_Z3 and self._display_mode == 2:
             bx, by, bz = GRID_BASE_REL
             bsx, bsy, bsz = GRID_BASE_SIZE
             brgba = _rgbaf(GRID_BASE_COLOR, GRID_BASE_ALPHA)
@@ -997,6 +1017,52 @@ class Zone12CarpetPublisher(Node):
             z3_surface_frame = f"{prefix}zone3_surface"
             z3_clr = Z3_PLATFORM_RED_CLR if team == "RED" else Z3_PLATFORM_BLUE_CLR
             z3rgba = _rgbaf(z3_clr, Z3_PLATFORM_ALPHA)
+
+            z3x, z3y, z3z = ZONE3_ROOT[team]
+            surface_dx = FIELD_Z3_SURFACE_CENTER[0] - z3x
+            surface_dy = FIELD_Z3_SURFACE_CENTER[1] - z3y
+            surface_dz = FIELD_Z3_SURFACE_CENTER[2] - z3z
+            bx = surface_dx + GRID_BASE_REL[0]
+            by = surface_dy + GRID_BASE_REL[1]
+            bz = surface_dz - 0.4 + GRID_BASE_REL[2]
+            bsx, bsy, bsz = GRID_BASE_SIZE
+            brgba = _rgbaf(GRID_BASE_COLOR, GRID_BASE_ALPHA)
+            grid_base_frame = f"{prefix}field_zone3_grid_base"
+            mid = self._push_marker(
+                ma,
+                self._cube(
+                    z3_surface_frame, "field_zone3_grid_base", mid,
+                    bx, by, bz, bsx, bsy, bsz, brgba, stamp=stamp,
+                ),
+                mid,
+            )
+
+            bsx2, bsy2, bsz2 = GRID_BLOCK_SIZE
+            brgba2 = _rgbaf(GRID_BLOCK_COLOR, GRID_BLOCK_ALPHA)
+            for lz in GRID_LAYER_ZS_REL:
+                for cy in GRID_COL_YS_REL:
+                    mid = self._push_marker(
+                        ma,
+                        self._cube(
+                            grid_base_frame, "field_zone3_grid_blocks", mid,
+                            0.0, cy, lz, bsx2, bsy2, bsz2, brgba2, stamp=stamp,
+                        ),
+                        mid,
+                    )
+
+            px = surface_dx + Z3_PARTITION_REL[0]
+            py = surface_dy + Z3_PARTITION_REL[1]
+            pz = surface_dz - 0.4 + Z3_PARTITION_REL[2]
+            psx, psy, psz = Z3_PARTITION_SIZE
+            prgba = _rgbaf(WOOD_COLOR, WOOD_ALPHA_FULL)
+            mid = self._push_marker(
+                ma,
+                self._cube(
+                    z3_surface_frame, "field_zone3_center_partition", mid,
+                    px, py, pz, psx, psy, psz, prgba, stamp=stamp,
+                ),
+                mid,
+            )
 
             mrx, mry, mrz = Z3_MAIN_REL[team]
             mid = self._push_cube(

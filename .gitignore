@@ -27,6 +27,17 @@ __pycache__/
 *.tmp
 *.bak
 RECOVERED_FILES/
+outputs/
+backup_*/
+backup_zone3_*/
+will_push/
+
+# Local archive / cloned experiment folders
+*.zip
+qjy/*.zip
+qjy/rc2026/
+qjy/rc2026_clean/
+qjy/rc2026_CONFLICT_STATUS_*.txt
 
 # OS metadata
 Thumbs.db
